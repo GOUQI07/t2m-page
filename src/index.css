@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #DEDBC8;
+  --font-serif: "Instrument Serif", serif;
+}
+
+* {
+  font-family: 'Almarai', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(222, 219, 200, 0.34) rgba(255, 255, 255, 0.035);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(222, 219, 200, 0.26);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(222, 219, 200, 0.44);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.scene-map-scrollbars {
+  scrollbar-color: transparent transparent;
+}
+
+.scene-map-scrollbars::-webkit-scrollbar-track,
+.scene-map-scrollbars::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-color: transparent;
+}
+
+.scene-map-scrollbars.is-scrolling {
+  scrollbar-color: rgba(222, 219, 200, 0.34) rgba(255, 255, 255, 0.035);
+}
+
+.scene-map-scrollbars.is-scrolling::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.scene-map-scrollbars.is-scrolling::-webkit-scrollbar-thumb {
+  background: rgba(222, 219, 200, 0.26);
+  border-color: transparent;
+  background-clip: padding-box;
+}
+
+@layer utilities {
+  .noise-overlay {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat: repeat;
+    position: absolute;
+    inset: 0;
+  }
+  
+  .bg-noise {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat: repeat;
+    position: absolute;
+    inset: 0;
+  }
+}
