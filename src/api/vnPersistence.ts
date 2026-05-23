@@ -52,6 +52,14 @@ export async function loadBackendProject(projectId: string): Promise<unknown> {
   return data?.project ?? data;
 }
 
+export async function createBackendProject(project: VNProjectState): Promise<unknown> {
+  const data = await fetchJson('/api/v1/projects', {
+    method: 'POST',
+    json: project
+  });
+  return data?.project ?? data;
+}
+
 export async function saveBackendProject(project: VNProjectState): Promise<unknown> {
   const projectId = project.projectId || project.id || 'default';
   const data = await fetchJson(`/api/v1/projects/${encodeURIComponent(projectId)}`, {

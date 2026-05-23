@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source not "../playwright-report";
+@source not "../test-results";
 
 @theme {
   --color-primary: #DEDBC8;

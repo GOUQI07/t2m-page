@@ -5,6 +5,8 @@ export type VNVariableScope = 'global' | 'character' | 'scene';
 export type VNConditionOperator = 'equals' | 'not_equals' | 'greater_than' | 'greater_or_equal' | 'less_than' | 'less_or_equal' | 'exists' | 'not_exists';
 export type VNEffectType = 'set_flag' | 'unset_flag' | 'set_var' | 'add_var' | 'add_affinity' | 'mark_visited';
 export type VNTimelineMode = 'script' | 'timeline';
+export type VNActionType = 'line' | 'choice' | 'jump' | 'set_var' | 'show_character' | 'hide_character' | 'change_background' | 'play_bgm' | 'stop_bgm' | 'play_sfx' | 'show_cg' | 'transition' | 'ending';
+export type VNTimelineTrack = 'script' | 'background' | 'character' | 'voice' | 'bgm' | 'sfx' | 'fx';
 
 export interface VNVariableDefinition {
   key: string;
@@ -90,6 +92,7 @@ export interface VNRuntimeState {
 export interface VNSaveSlot {
   slotId: string;
   projectId: string;
+  schemaVersion?: number;
   projectTitle?: string;
   name: string;
   thumbnail?: string;
@@ -101,7 +104,7 @@ export interface VNSaveSlot {
 export interface VNAction {
   id: string;
   sourceActionId?: string;
-  type: string;
+  type: VNActionType;
   speaker?: string;
   text?: string;
   emotion?: string;
@@ -114,8 +117,12 @@ export interface VNAction {
   bgImage?: string;
   charImage?: string;
   audioPath?: string;
+  start?: number;
   startTime?: number;
   duration?: number;
+  track?: VNTimelineTrack;
+  lane?: number;
+  locked?: boolean;
   layout?: { x: number; y: number; scale: number };
 }
 
@@ -156,6 +163,7 @@ export interface VNProjectState {
   id: string;
   title: string;
   entrySceneId?: string;
+  scenes?: VNNode[];
   nodes: VNNode[];
   timelineMode?: VNTimelineMode;
   sceneLinks?: VNSceneLink[];

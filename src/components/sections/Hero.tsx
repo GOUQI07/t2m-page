@@ -1,11 +1,22 @@
 import { motion } from "motion/react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, FolderPlus, LogIn, LogOut, Store, UserPlus } from "lucide-react";
 import { Link } from "react-router-dom";
 import { WordsPullUp } from "../animations/WordsPullUp";
+import { useAuth } from "../../auth/AuthContext";
 
 import { ParticleMorph } from "../animations/ParticleMorph";
 
 export function Hero() {
+  const { user, logout } = useAuth();
+  const topNavLinkClass = "text-[10px] sm:text-xs md:text-sm transition-colors duration-300";
+  const topNavLinkStyle = { color: "rgba(225, 224, 204, 0.8)" };
+  const brightenTopNavLink = (event: React.MouseEvent<HTMLElement>) => {
+    event.currentTarget.style.color = "#E1E0CC";
+  };
+  const dimTopNavLink = (event: React.MouseEvent<HTMLElement>) => {
+    event.currentTarget.style.color = "rgba(225, 224, 204, 0.8)";
+  };
+
   return (
     <section className="h-screen w-full p-4 md:p-6 bg-black">
       <div className="relative w-full h-full rounded-2xl md:rounded-[2rem] overflow-hidden bg-black">
@@ -18,18 +29,49 @@ export function Hero() {
 
         {/* Navbar Pill */}
         <nav className="absolute top-0 left-1/2 -translate-x-1/2 bg-black rounded-b-2xl md:rounded-b-3xl px-4 py-2 md:px-8 flex items-center justify-center gap-3 sm:gap-6 md:gap-12 lg:gap-14 z-10">
-          {["Our story", "Collective", "Workshops", "Programs", "Inquiries"].map((item) => (
+          {["Our story", "Collective", "Workshops"].map((item) => (
             <a
               key={item}
               href="#"
-              className="text-[10px] sm:text-xs md:text-sm transition-colors duration-300"
-              style={{ color: "rgba(225, 224, 204, 0.8)" }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = "#E1E0CC")}
-              onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(225, 224, 204, 0.8)")}
+              className={topNavLinkClass}
+              style={topNavLinkStyle}
+              onMouseEnter={brightenTopNavLink}
+              onMouseLeave={dimTopNavLink}
             >
               {item}
             </a>
           ))}
+          <Link
+            to="/market"
+            className={`${topNavLinkClass} inline-flex items-center gap-1.5`}
+            style={topNavLinkStyle}
+            onMouseEnter={brightenTopNavLink}
+            onMouseLeave={dimTopNavLink}
+          >
+            Plaza
+            <Store className="h-3.5 w-3.5" />
+          </Link>
+          {user ? (
+            <button
+              type="button"
+              onClick={() => logout()}
+              className="inline-flex items-center gap-1 text-[10px] sm:text-xs md:text-sm text-primary/80 transition-colors hover:text-primary"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              Logout
+            </button>
+          ) : (
+            <>
+              <Link to="/login" className="inline-flex items-center gap-1 text-[10px] sm:text-xs md:text-sm text-primary/80 transition-colors hover:text-primary">
+                <LogIn className="h-3.5 w-3.5" />
+                Login
+              </Link>
+              <Link to="/register" className="inline-flex items-center gap-1 text-[10px] sm:text-xs md:text-sm text-primary/80 transition-colors hover:text-primary">
+                <UserPlus className="h-3.5 w-3.5" />
+                Register
+              </Link>
+            </>
+          )}
         </nav>
 
         {/* Bottom Content */}
@@ -68,13 +110,17 @@ export function Hero() {
                   ease: [0.16, 1, 0.3, 1],
                 }}
               >
-                <Link to="/workstation" className="group inline-flex items-center gap-2 hover:gap-3 bg-primary rounded-full pl-5 pr-1 py-1 transition-all duration-300">
+                <Link to="/projects/new" className="group inline-flex items-center gap-2 hover:gap-3 bg-primary rounded-full pl-5 pr-1 py-1 transition-all duration-300">
                   <span className="text-black font-medium text-sm sm:text-base ml-1">
-                    Enter Workstation
+                    New Project
                   </span>
                   <div className="bg-black rounded-full w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center transition-transform duration-300 group-hover:scale-110 ml-2">
-                    <ArrowRight className="text-[#E1E0CC] w-4 h-4 sm:w-5 sm:h-5" />
+                    <FolderPlus className="text-[#E1E0CC] w-4 h-4 sm:w-5 sm:h-5" />
                   </div>
+                </Link>
+                <Link to="/workstation" className="ml-3 inline-flex items-center gap-2 rounded-full border border-primary/30 px-5 py-3 text-sm sm:text-base text-primary/80 transition-colors hover:border-primary hover:text-primary">
+                  Workstation
+                  <ArrowRight className="w-4 h-4 -rotate-45" />
                 </Link>
                 <Link to="/asset-lab" className="ml-3 inline-flex items-center gap-2 rounded-full border border-primary/30 px-5 py-3 text-sm sm:text-base text-primary/80 transition-colors hover:border-primary hover:text-primary">
                   Asset Lab

@@ -26,6 +26,7 @@ import {
   VNChoice,
   VNSceneLink,
   VNSceneType,
+  VNActionType,
   VNVariableDefinition,
   VNVariableScope,
   VNVariableType,
@@ -34,6 +35,7 @@ import {
   VNEffect,
   VNEffectType,
   VNTimelineMode,
+  VNTimelineTrack,
   VNRuntimeHistoryEntry,
   VNRuntimeState,
   VNSelectedChoiceHistoryEntry,
@@ -74,7 +76,63 @@ type PickerState = {
   query: string;
 };
 
+type ResourcePromptDraft = {
+  open: boolean;
+  kind: PickerKind;
+  regenerate: boolean;
+  prompt: string;
+};
+
+type StoryPreprocessReview = {
+  sceneCount?: number;
+  characterCount?: number;
+  actionCount?: number;
+  assetTaskCount?: number;
+  voiceTaskCount?: number;
+  hasChoices?: boolean;
+  summary?: string;
+};
+
+type StoryPreprocessDraft = {
+  preprocessId: string;
+  projectId: string;
+  sourceText: string;
+  mode: 'single_scene' | 'multi_scene';
+  review: StoryPreprocessReview;
+  script: any;
+};
+
 const VN_SCHEMA_VERSION = 2;
+const MIN_LEFT_SIDEBAR_WIDTH = 208;
+const MAX_LEFT_SIDEBAR_WIDTH = 420;
+const MIN_RIGHT_SIDEBAR_WIDTH = 256;
+const MAX_RIGHT_SIDEBAR_WIDTH = 500;
+const MIN_TIMELINE_HEIGHT = 120;
+const DEFAULT_SCRIPT_TIMELINE_HEIGHT = 240;
+const DEFAULT_TRACK_TIMELINE_HEIGHT = 448;
+
+type WorkbenchResizeTarget = 'left' | 'right' | 'timeline';
+type PersistenceStatus = 'booting' | 'local' | 'syncing' | 'synced' | 'offline';
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function persistenceLabel(status: PersistenceStatus, locale: Locale) {
+  const zh = locale === 'zh-CN';
+  if (status === 'synced') return zh ? '云端已同步' : 'Cloud synced';
+  if (status === 'syncing') return zh ? '同步中' : 'Syncing';
+  if (status === 'offline') return zh ? '仅本地缓存' : 'Local cache only';
+  if (status === 'booting') return zh ? '检查同步' : 'Checking sync';
+  return zh ? '本地缓存' : 'Local cache';
+}
+
+function persistenceClass(status: PersistenceStatus) {
+  if (status === 'synced') return 'border-emerald-300/25 text-emerald-200';
+  if (status === 'syncing' || status === 'booting') return 'border-primary/30 text-primary';
+  if (status === 'offline') return 'border-amber-300/30 text-amber-100';
+  return 'border-white/15 text-white/45';
+}
 
 function pickText(...values: unknown[]) {
   for (const value of values) {
@@ -133,6 +191,9 @@ type TimelineClip = TimedAction & {
   label: string;
   className: string;
   isEmpty?: boolean;
+  track: VNTimelineTrack;
+  lane: number;
+  locked: boolean;
 };
 
 type SceneGraphNodeLayout = {
@@ -212,12 +273,16 @@ function ensureActionTimings(actions: VNAction[]) {
   let cursor = 0;
   return actions.map(action => {
     const duration = normalizeDurationSeconds(action.duration, estimateActionDuration(action));
-    const startTime = normalizeOptionalSeconds(action.startTime) ?? cursor;
+    const startTime = normalizeOptionalSeconds(action.startTime ?? action.start) ?? cursor;
     cursor = Math.max(cursor, startTime + duration);
     return {
       ...action,
+      start: startTime,
       startTime,
-      duration
+      duration,
+      track: action.track || defaultTimelineTrack(action),
+      lane: Number.isFinite(Number(action.lane)) ? Number(action.lane) : 0,
+      locked: Boolean(action.locked)
     };
   });
 }
@@ -227,7 +292,7 @@ function buildTimedActions(actions: VNAction[], assetById?: (id?: string) => VNA
   return actions.map((action, index) => {
     const voiceDuration = audioDurationFromAsset(assetById?.(action.audioAssetId));
     const duration = normalizeDurationSeconds(action.duration ?? voiceDuration, estimateActionDuration(action));
-    const startTime = normalizeOptionalSeconds(action.startTime) ?? cursor;
+    const startTime = normalizeOptionalSeconds(action.startTime ?? action.start) ?? cursor;
     const timedAction = {
       action,
       index,
@@ -260,6 +325,31 @@ function readAudioDuration(src: string) {
 function normalizeSceneType(value: unknown): VNSceneType {
   const type = pickText(value) as VNSceneType;
   return ['normal', 'branch', 'ending', 'menu', 'system'].includes(type) ? type : 'normal';
+}
+
+function normalizeActionType(value: unknown, hasChoices = false): VNActionType {
+  if (hasChoices) return 'choice';
+  const type = pickText(value).toLowerCase() as VNActionType | 'dialogue' | 'narration';
+  if (type === 'dialogue' || type === 'narration') return 'line';
+  return ['line', 'choice', 'jump', 'set_var', 'show_character', 'hide_character', 'change_background', 'play_bgm', 'stop_bgm', 'play_sfx', 'show_cg', 'transition', 'ending'].includes(type)
+    ? type as VNActionType
+    : 'line';
+}
+
+function normalizeTimelineTrack(value: unknown, fallback: VNTimelineTrack = 'script'): VNTimelineTrack {
+  const track = pickText(value).toLowerCase() as VNTimelineTrack;
+  return ['script', 'background', 'character', 'voice', 'bgm', 'sfx', 'fx'].includes(track) ? track : fallback;
+}
+
+function defaultTimelineTrack(action: Partial<VNAction>): VNTimelineTrack {
+  if (action.track) return normalizeTimelineTrack(action.track);
+  if (action.type === 'change_background' || action.bgAssetId || action.bgImage) return 'background';
+  if (action.type === 'show_character' || action.type === 'hide_character' || action.charAssetId || action.charImage) return 'character';
+  if (action.type === 'play_bgm' || action.type === 'stop_bgm') return 'bgm';
+  if (action.type === 'play_sfx') return 'sfx';
+  if (action.type === 'show_cg' || action.type === 'transition') return 'fx';
+  if (action.audioAssetId || action.audioPath) return 'voice';
+  return 'script';
 }
 
 function normalizeVariableType(value: unknown): VNVariableType {
@@ -364,11 +454,14 @@ function normalizeAction(action: any, sceneIndex: number, actionIndex: number, a
       : [];
   const spriteIds = action?.sprite_asset_task_ids || action?.sprite_asset_ids || [];
   const layout = action?.layout || {};
+  const type = normalizeActionType(action?.type || action?.action_type, rawChoices.length > 0);
+  const startTime = normalizeOptionalSeconds(action?.startTime ?? action?.start ?? action?.start_time ?? action?.timeline?.startTime ?? action?.timeline?.start_time);
+  const duration = normalizeOptionalSeconds(action?.duration ?? action?.durationSeconds ?? action?.duration_seconds ?? action?.timeline?.duration);
   return {
     ...(action && typeof action === 'object' ? action : {}),
     id: pickText(action?.id, action?.action_id) || `action_${sceneIndex + 1}_${actionIndex + 1}`,
     sourceActionId: pickText(action?.sourceActionId, action?.action_id) || undefined,
-    type: pickText(action?.type, action?.action_type) || 'dialogue',
+    type,
     speaker: pickText(action?.speaker, action?.speaker_name, action?.speaker_id) || 'Narrator',
     text: pickText(action?.text, action?.dialogue, action?.line),
     emotion: pickText(action?.emotion) || undefined,
@@ -381,8 +474,12 @@ function normalizeAction(action: any, sceneIndex: number, actionIndex: number, a
     bgImage: pickText(action?.bgImage, action?.background_url) || undefined,
     charImage: pickText(action?.charImage, action?.sprite_url) || undefined,
     audioPath: pickText(action?.audioPath, action?.audio_url) || undefined,
-    startTime: normalizeOptionalSeconds(action?.startTime ?? action?.start_time ?? action?.timeline?.startTime ?? action?.timeline?.start_time),
-    duration: normalizeOptionalSeconds(action?.duration ?? action?.durationSeconds ?? action?.duration_seconds ?? action?.timeline?.duration),
+    start: startTime,
+    startTime,
+    duration,
+    track: normalizeTimelineTrack(action?.track ?? action?.timeline?.track, defaultTimelineTrack({ ...action, type })),
+    lane: Number.isFinite(Number(action?.lane ?? action?.timeline?.lane)) ? Number(action?.lane ?? action?.timeline?.lane) : 0,
+    locked: Boolean(action?.locked ?? action?.timeline?.locked),
     layout: {
       x: Number(layout.x ?? positionToOffset(layout.position)),
       y: Number(layout.y ?? 0),
@@ -445,6 +542,7 @@ function normalizeProjectState(rawProject: any): VNProjectState {
     title: pickText(rawProject?.title) || 'Generated Visual Novel',
     entrySceneId,
     timelineMode: (rawProject?.timelineMode === 'timeline' || rawProject?.timeline_mode === 'timeline') ? 'timeline' : 'script',
+    scenes: nodes,
     nodes,
     sceneLinks: deriveSceneLinks(nodes),
     assets: Array.isArray(rawProject?.assets) ? rawProject.assets : [],
@@ -625,12 +723,18 @@ function mergeSaveSlots(...groups: VNSaveSlot[][]) {
 function projectForPersistence(project: VNProjectState): VNProjectState {
   const { saveSlots: _saveSlots, ...rest } = project;
   const projectId = project.projectId || project.id || 'default';
+  const nodes = project.nodes.map(node => ({
+    ...node,
+    actions: ensureActionTimings(node.actions)
+  }));
   return {
     ...rest,
     schemaVersion: project.schemaVersion || VN_SCHEMA_VERSION,
     projectId,
     id: project.id || projectId,
-    sceneLinks: deriveSceneLinks(project.nodes)
+    nodes,
+    scenes: nodes,
+    sceneLinks: deriveSceneLinks(nodes)
   };
 }
 
@@ -718,6 +822,16 @@ function buildPlayableHtml(project: VNProjectState) {
   button { border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.07); color: #f4f1df; border-radius: 999px; min-height: 2.4rem; padding: .55rem 1rem; font: inherit; cursor: pointer; }
   button:hover { border-color: #d4ff63; color: #d4ff63; }
   .topbar { position: absolute; z-index: 3; left: 1rem; right: 1rem; top: 1rem; display: flex; justify-content: space-between; color: rgba(244,241,223,.55); font-size: .78rem; pointer-events: none; }
+  .runtime-menu { pointer-events: auto; display: flex; gap: .5rem; padding: .25rem; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(0,0,0,.48); backdrop-filter: blur(14px); }
+  .runtime-menu button { min-height: 1.9rem; padding: .3rem .75rem; font-size: .75rem; }
+  .save-panel { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; padding: 1.25rem; background: rgba(0,0,0,.62); backdrop-filter: blur(12px); }
+  .save-dialog { width: min(42rem, 100%); max-height: min(34rem, 90vh); overflow: hidden; border: 1px solid rgba(255,255,255,.14); border-radius: 1rem; background: rgba(5,5,5,.92); box-shadow: 0 2rem 5rem rgba(0,0,0,.5); }
+  .save-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; border-bottom: 1px solid rgba(255,255,255,.12); }
+  .save-list { display: grid; gap: .75rem; max-height: 25rem; overflow: auto; padding: 1rem; }
+  .save-card { border: 1px solid rgba(255,255,255,.12); border-radius: .75rem; background: rgba(255,255,255,.04); padding: .9rem; }
+  .save-card strong { display: block; margin-bottom: .25rem; color: #f4f1df; }
+  .save-card p { margin: 0; color: rgba(244,241,223,.5); font-size: .75rem; }
+  .save-card footer { display: flex; gap: .5rem; margin-top: .75rem; }
   .empty { display: grid; min-height: 100vh; place-items: center; padding: 2rem; color: rgba(244,241,223,.55); }
 </style>
 </head>
@@ -731,6 +845,8 @@ const vars = {};
 const visited = new Set();
 const assetById = new Map((project.assets || []).map(asset => [asset.id, asset]));
 const app = document.getElementById("app");
+const saveKey = "ariadne_saves_" + (project.projectId || project.id || "default");
+let savePanelOpen = false;
 
 function scene() { return (project.nodes || []).find(item => item.id === sceneId) || project.nodes?.[0]; }
 function action() { return scene()?.actions?.[actionIndex]; }
@@ -768,6 +884,54 @@ function applyEffects(effects = [], fallbackSceneId) {
     else if (effect.type === "mark_visited") visited.add(effect.sceneId || fallbackSceneId);
   });
 }
+function loadSaves() {
+  try {
+    const slots = JSON.parse(localStorage.getItem(saveKey) || "[]");
+    return Array.isArray(slots) ? slots : [];
+  } catch {
+    return [];
+  }
+}
+function writeSaves(slots) {
+  localStorage.setItem(saveKey, JSON.stringify(slots.slice(0, 12)));
+}
+function saveGame() {
+  const currentScene = scene();
+  if (!currentScene) return;
+  const now = new Date().toISOString();
+  const slot = {
+    slotId: "slot_" + Date.now(),
+    name: (currentScene.title || currentScene.id || "Scene") + " #" + (actionIndex + 1),
+    updatedAt: now,
+    state: {
+      currentSceneId: currentScene.id,
+      currentActionIndex: actionIndex,
+      variables: { ...vars },
+      visitedSceneIds: Array.from(visited)
+    }
+  };
+  writeSaves([slot, ...loadSaves()]);
+  savePanelOpen = true;
+  render();
+}
+function restoreSave(slotId) {
+  const slot = loadSaves().find(item => item.slotId === slotId);
+  if (!slot?.state) return;
+  const targetScene = (project.nodes || []).find(item => item.id === slot.state.currentSceneId);
+  if (!targetScene) return;
+  Object.keys(vars).forEach(key => delete vars[key]);
+  Object.assign(vars, slot.state.variables || {});
+  visited.clear();
+  (slot.state.visitedSceneIds || [targetScene.id]).forEach(id => visited.add(id));
+  sceneId = targetScene.id;
+  actionIndex = Math.min(Math.max(0, slot.state.currentActionIndex || 0), Math.max(0, (targetScene.actions || []).length - 1));
+  savePanelOpen = false;
+  render();
+}
+function deleteSave(slotId) {
+  writeSaves(loadSaves().filter(item => item.slotId !== slotId));
+  render();
+}
 function jumpTo(targetSceneId, targetActionId) {
   const nextScene = (project.nodes || []).find(item => item.id === targetSceneId);
   if (!nextScene) return;
@@ -800,12 +964,22 @@ function render() {
   const bg = current.bgImage || assetUrl(current.bgAssetId) || assetUrl(currentScene.backgroundAssetId) || "";
   const sprite = current.charImage || assetUrl(current.charAssetId) || "";
   const choices = (current.choices || []).filter(choice => (choice.conditions || []).every(conditionOk));
+  const slots = loadSaves();
+  const savePanel = savePanelOpen ? '<div class="save-panel"><section class="save-dialog" onclick="event.stopPropagation()"><header><div><strong>Save / Load</strong><p>' + html(project.title || "Visual Novel") + '</p></div><button data-close-saves>Close</button></header><div class="save-list">' + (slots.length ? slots.map(slot => '<article class="save-card"><strong>' + html(slot.name || "Save") + '</strong><p>' + html(new Date(slot.updatedAt || Date.now()).toLocaleString()) + '</p><footer><button data-load-save="' + html(slot.slotId) + '">Load</button><button data-delete-save="' + html(slot.slotId) + '">Delete</button></footer></article>').join("") : '<div class="save-card"><p>No saves yet.</p></div>') + '</div></section></div>' : "";
   app.innerHTML = \`
     <main class="stage" onclick="if(event.target === this || event.target.className === 'scrim') advance()">
-      <div class="topbar"><span>\${html(project.title || "Visual Novel")}</span><span>\${html(currentScene.title || currentScene.id)}</span></div>
+      <div class="topbar">
+        <span>\${html(project.title || "Visual Novel")}</span>
+        <div class="runtime-menu">
+          <button data-save-game>Save</button>
+          <button data-load-menu>Load</button>
+        </div>
+        <span>\${html(currentScene.title || currentScene.id)}</span>
+      </div>
       \${bg ? \`<img class="bg" src="\${html(bg)}" alt="">\` : ""}
       <div class="scrim"></div>
       \${sprite ? \`<img class="sprite" src="\${html(sprite)}" alt="">\` : ""}
+      \${savePanel}
     </main>
     <section class="hud" onclick="if(!event.target.closest('button')) advance()">
       <div class="meta"><span class="speaker">\${html(current.speaker || "Narrator")}</span><span>\${actionIndex + 1} / \${currentScene.actions.length}</span></div>
@@ -816,6 +990,36 @@ function render() {
     button.addEventListener("click", event => {
       event.stopPropagation();
       choose(choices.find(choice => choice.id === button.dataset.choice));
+    });
+  });
+  app.querySelector("[data-save-game]")?.addEventListener("click", event => {
+    event.stopPropagation();
+    saveGame();
+  });
+  app.querySelector("[data-load-menu]")?.addEventListener("click", event => {
+    event.stopPropagation();
+    savePanelOpen = true;
+    render();
+  });
+  app.querySelector("[data-close-saves]")?.addEventListener("click", event => {
+    event.stopPropagation();
+    savePanelOpen = false;
+    render();
+  });
+  app.querySelector(".save-panel")?.addEventListener("click", () => {
+    savePanelOpen = false;
+    render();
+  });
+  app.querySelectorAll("[data-load-save]").forEach(button => {
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      restoreSave(button.dataset.loadSave);
+    });
+  });
+  app.querySelectorAll("[data-delete-save]").forEach(button => {
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      deleteSave(button.dataset.deleteSave);
     });
   });
   const audioUrl = current.audioPath || assetUrl(current.audioAssetId);
@@ -864,6 +1068,12 @@ function validateProject(project: VNProjectState): ProjectValidationIssue[] {
 
   project.nodes.forEach(node => {
     duplicateValues(node.actions.map(action => action.id)).forEach(id => issues.push({ id: `duplicate_action_${node.id}_${id}`, severity: 'error', message: `Duplicate action id: ${id}`, sceneId: node.id, actionId: id }));
+    if (node.backgroundAssetId && !assetIds.has(node.backgroundAssetId)) {
+      issues.push({ id: `missing_scene_bg_${node.id}`, severity: 'warning', message: `${node.title} references missing scene background asset: ${node.backgroundAssetId}`, sceneId: node.id });
+    }
+    if (node.bgmAssetId && !assetIds.has(node.bgmAssetId)) {
+      issues.push({ id: `missing_scene_bgm_${node.id}`, severity: 'warning', message: `${node.title} references missing BGM asset: ${node.bgmAssetId}`, sceneId: node.id });
+    }
     if (node.defaultNextSceneId && !sceneIdSet.has(node.defaultNextSceneId)) {
       issues.push({ id: `missing_default_${node.id}`, severity: 'error', message: `${node.title} default next scene is missing: ${node.defaultNextSceneId}`, sceneId: node.id });
     }
@@ -1259,7 +1469,7 @@ function scriptToProjectState(script: any, requestId: string, projectId: string,
         return {
           id: action.id || action.action_id || `action_${stageIndex + 1}_${actionIndex + 1}`,
           sourceActionId: action.action_id || action.id,
-          type: action.action_type || action.type || 'dialogue',
+          type: normalizeActionType(action.action_type || action.type),
           speaker: action.speaker_name || action.speaker || action.speaker_id || 'Narrator',
           text: action.text || action.dialogue || action.line || '',
           emotion: action.emotion || '',
@@ -1469,6 +1679,10 @@ export function Workstation() {
 
   const [promptInput, setPromptInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isCommittingDraft, setIsCommittingDraft] = useState(false);
+  const [preprocessDraft, setPreprocessDraft] = useState<StoryPreprocessDraft | null>(null);
+  const [preprocessReviewOpen, setPreprocessReviewOpen] = useState(false);
+  const [selectedDraftSceneId, setSelectedDraftSceneId] = useState('');
   
   const [activeNodeId, setActiveNodeId] = useState<string | null>(project.entrySceneId || project.nodes[0]?.id || null);
   const [activeActionIdx, setActiveActionIdx] = useState<number>(0);
@@ -1486,11 +1700,20 @@ export function Workstation() {
   const [timelineVisible, setTimelineVisible] = useState(true);
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(256);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(352);
+  const [timelineHeight, setTimelineHeight] = useState(
+    project.timelineMode === 'timeline' ? DEFAULT_TRACK_TIMELINE_HEIGHT : DEFAULT_SCRIPT_TIMELINE_HEIGHT
+  );
+  const [resizingPanel, setResizingPanel] = useState<WorkbenchResizeTarget | null>(null);
   const [layoutSourceActionId, setLayoutSourceActionId] = useState('');
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('content');
   const [assetPicker, setAssetPicker] = useState<PickerState>({ open: false, kind: 'bg', query: '' });
+  const [resourcePromptDraft, setResourcePromptDraft] = useState<ResourcePromptDraft | null>(null);
   const [libraryAssets, setLibraryAssets] = useState<UserAssetRecord[]>([]);
   const [workspaceNotice, setWorkspaceNotice] = useState('');
+  const [projectPersistenceStatus, setProjectPersistenceStatus] = useState<PersistenceStatus>('booting');
+  const [saveSlotPersistenceStatus, setSaveSlotPersistenceStatus] = useState<PersistenceStatus>('local');
   const [saveLoadOpen, setSaveLoadOpen] = useState(false);
   const [saveSlots, setSaveSlots] = useState<VNSaveSlot[]>(() => readSaveSlots(project.projectId || project.id || 'default'));
   const [saveSlotsProjectId, setSaveSlotsProjectId] = useState(project.projectId || project.id || 'default');
@@ -1501,6 +1724,7 @@ export function Workstation() {
     return firstSceneId ? [firstSceneId] : [];
   });
   const [selectedChoiceHistory, setSelectedChoiceHistory] = useState<VNSelectedChoiceHistoryEntry[]>([]);
+  const [runtimeBackStack, setRuntimeBackStack] = useState<VNRuntimeState[]>([]);
   const [runtimeStartedAt, setRuntimeStartedAt] = useState(() => new Date().toISOString());
   const [playheadTime, setPlayheadTime] = useState(0);
   const [timelineZoom, setTimelineZoom] = useState(1);
@@ -1577,7 +1801,10 @@ export function Workstation() {
       try {
         const projects = await listBackendProjects();
         const latest = projects[0];
-        if (!latest?.projectId) return;
+        if (!latest?.projectId) {
+          setProjectPersistenceStatus('local');
+          return;
+        }
 
         const loadedProject = await loadBackendProject(latest.projectId);
         if (cancelled) return;
@@ -1585,9 +1812,10 @@ export function Workstation() {
         const normalized = normalizeProjectState(loadedProject);
         setProject(normalized);
         syncActiveSelectionForProject(normalized);
+        setProjectPersistenceStatus('synced');
         setWorkspaceNotice(t('backendProjectLoaded', { title: normalized.title }));
       } catch {
-        // localStorage remains the source of truth when the backend is offline.
+        setProjectPersistenceStatus('offline');
       } finally {
         backendBootstrapCompleteRef.current = true;
       }
@@ -1626,7 +1854,6 @@ export function Workstation() {
   const exportProjectJson = () => {
     const exportProject = {
       ...projectForPersistence(project),
-      saveSlots,
       exportedAt: new Date().toISOString()
     };
     const blob = new Blob([JSON.stringify(exportProject, null, 2)], { type: 'application/json' });
@@ -1656,33 +1883,27 @@ export function Workstation() {
       const parsed = JSON.parse(text);
       const migrated = await migrateBackendProject(parsed).catch(() => parsed);
       const nextProject = normalizeProjectState(migrated);
-      const importedSlots = Array.isArray(parsed?.saveSlots)
-        ? parsed.saveSlots
-        : Array.isArray((migrated as any)?.saveSlots)
-          ? (migrated as any).saveSlots
-          : [];
       const nextProjectId = nextProject.projectId || nextProject.id || 'default';
+      const localSlots = readSaveSlots(nextProjectId);
 
       localStorage.setItem('vn_project', JSON.stringify(projectForPersistence(nextProject)));
-      if (importedSlots.length) {
-        writeSaveSlots(nextProjectId, importedSlots);
-      }
 
       setProject(nextProject);
       syncActiveSelectionForProject(nextProject);
       setSaveSlotsProjectId(nextProjectId);
-      setSaveSlots(importedSlots);
+      setSaveSlots(localSlots);
       setRuntimeVariables({});
       setRuntimeHistory([]);
       setSelectedChoiceHistory([]);
+      setRuntimeBackStack([]);
       setVisitedSceneIds(nextProject.entrySceneId ? [nextProject.entrySceneId] : nextProject.nodes[0]?.id ? [nextProject.nodes[0].id] : []);
       setRuntimeStartedAt(new Date().toISOString());
       setActiveActionIdx(0);
 
-      saveBackendProject(projectForPersistence(nextProject)).catch(() => {});
-      importedSlots.forEach(slot => {
-        saveBackendSaveSlot(nextProjectId, { ...slot, projectId: nextProjectId }).catch(() => {});
-      });
+      setProjectPersistenceStatus('syncing');
+      saveBackendProject(projectForPersistence(nextProject))
+        .then(() => setProjectPersistenceStatus('synced'))
+        .catch(() => setProjectPersistenceStatus('offline'));
 
       setWorkspaceNotice(t('projectImported', { title: nextProject.title }));
     } catch (error) {
@@ -1757,14 +1978,18 @@ export function Workstation() {
     const persistableProject = projectForPersistence(project);
     localStorage.setItem('vn_project', JSON.stringify(persistableProject));
 
-    if (!backendBootstrapCompleteRef.current) return;
+    if (!backendBootstrapCompleteRef.current) {
+      setProjectPersistenceStatus('local');
+      return;
+    }
     if (projectSaveTimerRef.current) {
       clearTimeout(projectSaveTimerRef.current);
     }
     projectSaveTimerRef.current = setTimeout(() => {
-      saveBackendProject(persistableProject).catch(() => {
-        // The localStorage fallback intentionally stays silent during dev/offline work.
-      });
+      setProjectPersistenceStatus('syncing');
+      saveBackendProject(persistableProject)
+        .then(() => setProjectPersistenceStatus('synced'))
+        .catch(() => setProjectPersistenceStatus('offline'));
     }, 800);
 
     return () => {
@@ -1780,6 +2005,7 @@ export function Workstation() {
     const localSlots = readSaveSlots(projectStorageId);
     setSaveSlots(localSlots);
     setSaveSlotsProjectId(projectStorageId);
+    setSaveSlotPersistenceStatus('syncing');
 
     listBackendSaveSlots(projectStorageId)
       .then(remoteSlots => {
@@ -1787,9 +2013,10 @@ export function Workstation() {
         if (remoteSlots.length) {
           setSaveSlots(current => mergeSaveSlots(remoteSlots, current, localSlots));
         }
+        setSaveSlotPersistenceStatus('synced');
       })
       .catch(() => {
-        // Keep the local save slots available while backend persistence is unavailable.
+        setSaveSlotPersistenceStatus('offline');
       });
 
     return () => {
@@ -2021,73 +2248,149 @@ export function Workstation() {
     return () => clearInterval(t);
   }, [project.requestId, project.assets]);
 
+  const applyCommittedVisualNovel = (payload: any, fallbackProjectId: string, fallbackSourceText: string) => {
+      const requestId = payload.requestId || `task_${Date.now()}`;
+      const script = payload.script || {};
+      const imageTaskCount = Number(payload.imageTaskCount || 0);
+      const voiceTaskCount = Number(payload.voiceTaskCount || 0);
+      const nextProject = payload.project
+        ? normalizeProjectState({
+          ...payload.project,
+          requestId,
+          script,
+          sourceText: fallbackSourceText,
+          imageTaskCount,
+          voiceTaskCount,
+          generationStatus: imageTaskCount || voiceTaskCount ? 'generating_assets' : 'script_ready'
+        })
+        : scriptToProjectState(
+          script,
+          requestId,
+          payload.projectId || script.project_id || fallbackProjectId,
+          imageTaskCount,
+          voiceTaskCount,
+          fallbackSourceText
+        );
+
+      setProject(nextProject);
+      setActiveNodeId(nextProject.entrySceneId || nextProject.nodes[0]?.id || null);
+      setActiveActionIdx(0);
+  };
+
   const handleGenerate = async () => {
       const sourceText = promptInput.trim();
       if (!sourceText) return;
       setIsGenerating(true);
       try {
           const projectId = createProjectId();
-          const res = await fetch('/api/v1/transmute/visual-novel', {
+          const res = await fetch('/api/v1/transmute/visual-novel/preprocess', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ project_id: projectId, text: sourceText })
           });
           const json = await res.json();
           if (!res.ok || json.code !== 0) {
-            throw new Error(json.message || 'visual novel generation failed');
+            throw new Error(json.message || 'visual novel preprocess failed');
           }
 
           const payload = json.data || {};
-          const requestId = payload.requestId || `task_${Date.now()}`;
           const script = payload.script || {};
-          const imageTaskCount = Number(payload.imageTaskCount || 0);
-          const voiceTaskCount = Number(payload.voiceTaskCount || 0);
-          const nextProject = payload.project
-            ? normalizeProjectState({
-              ...payload.project,
-              requestId,
-              script,
-              sourceText,
-              imageTaskCount,
-              voiceTaskCount,
-              generationStatus: imageTaskCount || voiceTaskCount ? 'generating_assets' : 'script_ready'
-            })
-            : scriptToProjectState(
-              script,
-              requestId,
-              payload.projectId || script.project_id || projectId,
-              imageTaskCount,
-              voiceTaskCount,
-              sourceText
-            );
+          const draftScenes = Array.isArray(script.scenes) && script.scenes.length
+            ? script.scenes
+            : Array.isArray(script.nodes) ? script.nodes : [];
+          const draft: StoryPreprocessDraft = {
+            preprocessId: payload.preprocessId || `pre_${Date.now()}`,
+            projectId: payload.projectId || script.project_id || projectId,
+            sourceText: payload.sourceText || sourceText,
+            mode: payload.mode === 'multi_scene' ? 'multi_scene' : 'single_scene',
+            review: payload.review || {},
+            script
+          };
 
-          setProject(nextProject);
-          setActiveNodeId(nextProject.entrySceneId || nextProject.nodes[0]?.id || null);
-          setActiveActionIdx(0);
-          setPromptInput('');
+          setPreprocessDraft(draft);
+          setSelectedDraftSceneId(pickText(draftScenes[0]?.id, draftScenes[0]?.scene_id));
+          setPreprocessReviewOpen(draft.mode === 'multi_scene' || Number(draft.review.sceneCount || draftScenes.length || 0) > 1);
       } catch (err) {
           console.error(err);
-          const demoguid = `demo_${Date.now()}`;
           setProject(p => ({
             ...p,
-            requestId: demoguid,
             generationStatus: 'failed',
-            error: err instanceof Error ? err.message : 'Generate failed',
-            entrySceneId: p.entrySceneId || demoguid,
-            nodes: [...p.nodes, { 
-              id: demoguid, 
-              title: 'Demo Scene', 
-              type: 'normal',
-              status: 'done', 
-              actions: [{ id: 'a1', type: 'dialogue', speaker: 'Sys', text: 'Generated line fallback from prompt: ' + sourceText, startTime: 0, duration: DEFAULT_ACTION_DURATION, layout: { x: 0, y: 0, scale: 1 } }] 
-            }]
+            error: err instanceof Error ? err.message : 'Preprocess failed'
           }));
-          setActiveNodeId(demoguid);
-          setActiveActionIdx(0);
-          setPromptInput('');
       } finally {
           setIsGenerating(false);
       }
+  };
+
+  const commitPreprocessDraft = async (draft = preprocessDraft) => {
+      if (!draft) return;
+      setIsCommittingDraft(true);
+      try {
+          const res = await fetch('/api/v1/transmute/visual-novel/commit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                preprocessId: draft.preprocessId,
+                project_id: draft.projectId,
+                sourceText: draft.sourceText,
+                script: draft.script
+              })
+          });
+          const json = await res.json();
+          if (!res.ok || json.code !== 0) {
+            throw new Error(json.message || 'visual novel commit failed');
+          }
+
+          applyCommittedVisualNovel(json.data || {}, draft.projectId, draft.sourceText);
+          setPreprocessDraft(null);
+          setPreprocessReviewOpen(false);
+          setSelectedDraftSceneId('');
+          setPromptInput('');
+      } catch (err) {
+          console.error(err);
+          setProject(p => ({
+            ...p,
+            generationStatus: 'failed',
+            error: err instanceof Error ? err.message : 'Commit failed'
+          }));
+      } finally {
+          setIsCommittingDraft(false);
+      }
+  };
+
+  const updateDraftScene = (sceneId: string, patch: Record<string, unknown>) => {
+      setPreprocessDraft(draft => {
+        if (!draft) return draft;
+        const updateScenes = (items: any[]) => items.map(scene => {
+          const id = pickText(scene?.id, scene?.scene_id);
+          return id === sceneId ? { ...scene, ...patch } : scene;
+        });
+        const script = { ...draft.script };
+        if (Array.isArray(script.scenes)) script.scenes = updateScenes(script.scenes);
+        if (Array.isArray(script.nodes)) script.nodes = updateScenes(script.nodes);
+        return { ...draft, script };
+      });
+  };
+
+  const updateDraftAction = (sceneId: string, actionId: string, patch: Record<string, unknown>) => {
+      setPreprocessDraft(draft => {
+        if (!draft) return draft;
+        const updateActions = (scene: any) => {
+          const id = pickText(scene?.id, scene?.scene_id);
+          if (id !== sceneId || !Array.isArray(scene?.actions)) return scene;
+          return {
+            ...scene,
+            actions: scene.actions.map((action: any) => {
+              const currentActionId = pickText(action?.id, action?.action_id);
+              return currentActionId === actionId ? { ...action, ...patch } : action;
+            })
+          };
+        };
+        const script = { ...draft.script };
+        if (Array.isArray(script.scenes)) script.scenes = script.scenes.map(updateActions);
+        if (Array.isArray(script.nodes)) script.nodes = script.nodes.map(updateActions);
+        return { ...draft, script };
+      });
   };
 
   if (!selectedGuide) {
@@ -2115,6 +2418,7 @@ export function Workstation() {
           {GUIDES.map((g, i) => (
             <motion.div
               key={g.id}
+              data-testid={`guide-card-${g.id}`}
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.1 }}
@@ -2143,6 +2447,12 @@ export function Workstation() {
 
   const guideAsset = GUIDES.find(g => g.id === selectedGuide);
   const sceneLinks = deriveSceneLinks(project.nodes);
+  const preprocessScenes = preprocessDraft
+    ? (Array.isArray(preprocessDraft.script?.scenes) && preprocessDraft.script.scenes.length
+      ? preprocessDraft.script.scenes
+      : Array.isArray(preprocessDraft.script?.nodes) ? preprocessDraft.script.nodes : [])
+    : [];
+  const selectedDraftScene = preprocessScenes.find((scene: any) => pickText(scene?.id, scene?.scene_id) === selectedDraftSceneId) || preprocessScenes[0];
   const incomingSceneIds = new Set(sceneLinks.map(link => link.toSceneId));
   const outgoingLinksBySceneId = sceneLinks.reduce((map, link) => {
     const links = map.get(link.fromSceneId) || [];
@@ -2182,9 +2492,86 @@ export function Workstation() {
     (_, index) => roundSeconds(index * timelineMajorStep)
   ).filter(time => time <= timelineTotalDuration + timelineMajorStep);
   const activeTimedAction = timedActions.find(item => item.index === activeActionIdx);
+  const makeTimelineClip = (
+    item: TimedAction,
+    label: string,
+    className: string,
+    track?: VNTimelineTrack
+  ): TimelineClip => ({
+    ...item,
+    label,
+    className,
+    track: track || item.action.track || defaultTimelineTrack(item.action),
+    lane: Number.isFinite(Number(item.action.lane)) ? Number(item.action.lane) : 0,
+    locked: Boolean(item.action.locked)
+  });
 
   const setTimelineModeValue = (mode: VNTimelineMode) => {
     setProject(p => ({ ...p, timelineMode: mode }));
+    if (mode === 'timeline') {
+      setTimelineHeight(height => Math.max(height, DEFAULT_TRACK_TIMELINE_HEIGHT));
+    }
+  };
+
+  const beginWorkbenchResize = (event: React.PointerEvent, target: WorkbenchResizeTarget) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const originX = event.clientX;
+    const originY = event.clientY;
+    const originLeftWidth = leftSidebarWidth;
+    const originRightWidth = rightSidebarWidth;
+    const originTimelineHeight = timelineHeight;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    const cursor = target === 'timeline' ? 'ns-resize' : 'col-resize';
+
+    setResizingPanel(target);
+    document.body.style.cursor = cursor;
+    document.body.style.userSelect = 'none';
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (target === 'left') {
+        const mainMinimum = 520;
+        const availableMax = window.innerWidth - (rightSidebarOpen ? rightSidebarWidth : 0) - mainMinimum;
+        setLeftSidebarWidth(clampNumber(
+          originLeftWidth + moveEvent.clientX - originX,
+          MIN_LEFT_SIDEBAR_WIDTH,
+          Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(MAX_LEFT_SIDEBAR_WIDTH, availableMax))
+        ));
+        return;
+      }
+
+      if (target === 'right') {
+        const mainMinimum = 520;
+        const availableMax = window.innerWidth - (leftSidebarOpen ? leftSidebarWidth : 0) - mainMinimum;
+        setRightSidebarWidth(clampNumber(
+          originRightWidth - (moveEvent.clientX - originX),
+          MIN_RIGHT_SIDEBAR_WIDTH,
+          Math.max(MIN_RIGHT_SIDEBAR_WIDTH, Math.min(MAX_RIGHT_SIDEBAR_WIDTH, availableMax))
+        ));
+        return;
+      }
+
+      const stageMinimum = 220;
+      const availableMax = window.innerHeight - 64 - stageMinimum;
+      setTimelineHeight(clampNumber(
+        originTimelineHeight - (moveEvent.clientY - originY),
+        MIN_TIMELINE_HEIGHT,
+        Math.max(MIN_TIMELINE_HEIGHT, availableMax)
+      ));
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      setResizingPanel(null);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp, { once: true });
   };
 
   const snapTimelineSeconds = (value: number, ignoreActionIndex?: number) => {
@@ -2249,6 +2636,7 @@ export function Workstation() {
           ...node,
           actions: node.actions.map((action, index) => index === actionIndex ? {
             ...action,
+            start: updates.startTime,
             startTime: updates.startTime,
             duration: updates.duration
           } : action)
@@ -2260,7 +2648,7 @@ export function Workstation() {
   const beginTimelineClipDrag = (event: React.PointerEvent, clip: TimelineClip, mode: TimelineDragMode) => {
     event.preventDefault();
     event.stopPropagation();
-    if (clip.isEmpty) return;
+    if (clip.isEmpty || clip.action.locked) return;
 
     beginProjectTransaction();
     const originX = event.clientX;
@@ -2593,7 +2981,7 @@ export function Workstation() {
       position: normalizePosition(undefined, project.nodes.length),
       actions: [{
         id: `action_${now}`,
-        type: 'dialogue',
+        type: 'line',
         speaker: guideAsset?.name || 'Narrator',
         text: '',
         startTime: 0,
@@ -2957,7 +3345,7 @@ export function Workstation() {
       position: normalizePosition(undefined, project.nodes.length),
       actions: [{
         id: `action_${now}`,
-        type: 'dialogue',
+        type: 'line',
         speaker: guideAsset?.name || 'Narrator',
         text: '',
         startTime: 0,
@@ -3074,9 +3462,11 @@ export function Workstation() {
     }));
   };
 
-  const activeBgAsset = assetById(currentAction?.bgAssetId);
+  const activeSceneBgAsset = assetById(activeNode?.backgroundAssetId);
+  const activeActionBgAsset = assetById(currentAction?.bgAssetId);
+  const activeBgAsset = activeActionBgAsset || activeSceneBgAsset;
   const activeCharAsset = assetById(currentAction?.charAssetId);
-  const activeBg = currentAction?.bgImage || activeBgAsset?.url;
+  const activeBg = currentAction?.bgImage || activeActionBgAsset?.url || activeSceneBgAsset?.url;
   const activeChar = currentAction?.charImage || activeCharAsset?.url || guideAsset?.image;
   const hasSceneBackground = Boolean(activeBg);
   const audioAssets = project.assets.filter(asset => asset.type === 'audio');
@@ -3120,6 +3510,48 @@ export function Workstation() {
     setRuntimeHistory(history => [...history, entry].slice(-120));
   };
 
+  const pushRuntimeSnapshot = () => {
+    const snapshot = buildRuntimeState();
+    if (!snapshot.currentSceneId) return;
+    setRuntimeBackStack(stack => [...stack, snapshot].slice(-120));
+  };
+
+  const restoreRuntimeState = (state: VNRuntimeState, resumePlaying = true) => {
+    const scene = sceneById(state.currentSceneId);
+    if (!scene) {
+      setWorkspaceNotice(t('saveTargetSceneNotFound', { sceneId: state.currentSceneId }));
+      return false;
+    }
+    const actionIndex = Math.min(
+      Math.max(0, state.currentActionIndex),
+      Math.max(0, scene.actions.length - 1)
+    );
+    stopAudio();
+    setActiveNodeId(scene.id);
+    setActiveActionIdx(actionIndex);
+    setRuntimeVariables(state.variables || {});
+    setRuntimeHistory(state.history || []);
+    setVisitedSceneIds(state.visitedSceneIds?.length ? state.visitedSceneIds : [scene.id]);
+    setSelectedChoiceHistory(state.selectedChoiceHistory || []);
+    setRuntimeStartedAt(state.startedAt || new Date().toISOString());
+    setIsPlaying(resumePlaying);
+    setPlayheadTime(buildTimedActions(scene.actions, assetById).find(item => item.index === actionIndex)?.startTime || 0);
+    if (resumePlaying && timelineMode === 'script') playActionAudio(scene.actions[actionIndex]);
+    return true;
+  };
+
+  const rollbackRuntime = () => {
+    const snapshot = runtimeBackStack[runtimeBackStack.length - 1];
+    if (!snapshot) {
+      setWorkspaceNotice(t('noRollbackState'));
+      return;
+    }
+    if (restoreRuntimeState(snapshot, isPlaying)) {
+      setRuntimeBackStack(stack => stack.slice(0, -1));
+      setWorkspaceNotice(t('runtimeRolledBack'));
+    }
+  };
+
   const saveRuntimeSlot = (slotId?: string) => {
     const now = new Date().toISOString();
     const runtimeState = buildRuntimeState(now);
@@ -3133,6 +3565,7 @@ export function Workstation() {
       const nextSlot: VNSaveSlot = {
         slotId: existing?.slotId || `slot_${Date.now()}`,
         projectId: projectStorageId,
+        schemaVersion: project.schemaVersion || VN_SCHEMA_VERSION,
         projectTitle: project.title,
         name: existing?.name || `${currentRuntimeScene?.title || t('scene')} #${runtimeState.currentActionIndex + 1}`,
         runtimeState,
@@ -3142,12 +3575,14 @@ export function Workstation() {
       const nextSlots = existing
         ? slots.map(slot => slot.slotId === existing.slotId ? nextSlot : slot)
         : [nextSlot, ...slots];
+      setSaveSlotPersistenceStatus('syncing');
       saveBackendSaveSlot(projectStorageId, nextSlot)
         .then(savedSlot => {
           setSaveSlots(current => mergeSaveSlots([savedSlot], current));
+          setSaveSlotPersistenceStatus('synced');
         })
         .catch(() => {
-          // The local slot was already written; backend sync can recover later.
+          setSaveSlotPersistenceStatus('offline');
         });
       return nextSlots.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     });
@@ -3159,35 +3594,22 @@ export function Workstation() {
       setWorkspaceNotice(t('saveOtherProject'));
       return;
     }
-    const scene = sceneById(slot.runtimeState.currentSceneId);
-    if (!scene) {
-      setWorkspaceNotice(t('saveTargetSceneNotFound', { sceneId: slot.runtimeState.currentSceneId }));
+    if (slot.schemaVersion && slot.schemaVersion !== (project.schemaVersion || VN_SCHEMA_VERSION)) {
+      setWorkspaceNotice(t('saveVersionMismatch'));
       return;
     }
-    const actionIndex = Math.min(
-      Math.max(0, slot.runtimeState.currentActionIndex),
-      Math.max(0, scene.actions.length - 1)
-    );
-    stopAudio();
-    setActiveNodeId(scene.id);
-    setActiveActionIdx(actionIndex);
-    setRuntimeVariables(slot.runtimeState.variables || {});
-    setRuntimeHistory(slot.runtimeState.history || []);
-    setVisitedSceneIds(slot.runtimeState.visitedSceneIds?.length ? slot.runtimeState.visitedSceneIds : [scene.id]);
-    setSelectedChoiceHistory(slot.runtimeState.selectedChoiceHistory || []);
-    setRuntimeStartedAt(slot.runtimeState.startedAt || new Date().toISOString());
-    setIsPlaying(true);
+    if (!restoreRuntimeState(slot.runtimeState, true)) return;
+    setRuntimeBackStack([]);
     setSaveLoadOpen(false);
-    setPlayheadTime(buildTimedActions(scene.actions, assetById).find(item => item.index === actionIndex)?.startTime || 0);
-    if (timelineMode === 'script') playActionAudio(scene.actions[actionIndex]);
     setWorkspaceNotice(t('loadedSave', { name: slot.name }));
   };
 
   const deleteRuntimeSlot = (slotId: string) => {
     setSaveSlots(slots => slots.filter(slot => slot.slotId !== slotId));
-    deleteBackendSaveSlot(projectStorageId, slotId).catch(() => {
-      // Deletion is reflected locally even if the backend is temporarily offline.
-    });
+    setSaveSlotPersistenceStatus('syncing');
+    deleteBackendSaveSlot(projectStorageId, slotId)
+      .then(() => setSaveSlotPersistenceStatus('synced'))
+      .catch(() => setSaveSlotPersistenceStatus('offline'));
     setWorkspaceNotice(t('saveDeleted'));
   };
 
@@ -3298,6 +3720,7 @@ export function Workstation() {
       setRuntimeStartedAt(now);
       setRuntimeHistory([]);
       setSelectedChoiceHistory([]);
+      setRuntimeBackStack([]);
       setVisitedSceneIds([entryNode.id]);
       setActiveNodeId(entryNode.id);
       setActiveActionIdx(0);
@@ -3310,6 +3733,7 @@ export function Workstation() {
     setRuntimeStartedAt(now);
     setRuntimeHistory([]);
     setSelectedChoiceHistory([]);
+    setRuntimeBackStack([]);
     setVisitedSceneIds([activeNode.id]);
     setIsPlaying(true);
     setPlayheadTime(activeTimedAction?.startTime || 0);
@@ -3320,11 +3744,13 @@ export function Workstation() {
     if (!isPlaying || !activeNode || !currentAction) return;
     if ((currentAction.choices?.length ?? 0) > 0) return;
     if (currentAction.type === 'jump' && currentAction.targetSceneId) {
+      pushRuntimeSnapshot();
       goToScene(currentAction.targetSceneId, currentAction.targetActionId);
       return;
     }
     if (activeActionIdx >= activeNode.actions.length - 1) {
       if (activeNode.defaultNextSceneId) {
+        pushRuntimeSnapshot();
         goToScene(activeNode.defaultNextSceneId);
         return;
       }
@@ -3334,6 +3760,7 @@ export function Workstation() {
     }
     const nextIndex = activeActionIdx + 1;
     const nextAction = activeNode.actions[nextIndex];
+    pushRuntimeSnapshot();
     pushRuntimeHistory('next_action');
     setActiveActionIdx(nextIndex);
     setPlayheadTime(timedActions.find(item => item.index === nextIndex)?.startTime || 0);
@@ -3346,6 +3773,7 @@ export function Workstation() {
       setWorkspaceNotice(choice.disabledText || t('choiceLocked', { label: choice.label }));
       return;
     }
+    pushRuntimeSnapshot();
     if (activeNode && currentAction) {
       setSelectedChoiceHistory(history => [...history, {
         id: `selected_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -3608,10 +4036,7 @@ export function Workstation() {
 
   const isChoiceAction = (action?: VNAction) => action?.type === 'choice';
 
-  const actionTypeFromSpeaker = (action: VNAction) => {
-    const speaker = (action.speaker || '').trim().toLowerCase();
-    return speaker === 'narrator' || speaker === '\u65c1\u767d' ? 'narration' : 'dialogue';
-  };
+  const actionTypeFromSpeaker = (_action: VNAction): VNActionType => 'line';
 
   const setChoiceMode = (checked: boolean) => {
     if (!currentAction) return;
@@ -3668,11 +4093,35 @@ export function Workstation() {
     return { label: t('pending'), className: 'border-yellow-300/30 text-yellow-100 bg-yellow-300/10' };
   };
 
-  const requestGenerateResource = async (kind: PickerKind, regenerate = false) => {
+  const buildResourcePrompt = (kind: PickerKind) => {
+    const parts = [
+      activeNode?.title ? `Scene: ${activeNode.title}` : '',
+      activeNode?.summary ? `Summary: ${activeNode.summary}` : '',
+      currentAction?.speaker ? `Speaker: ${currentAction.speaker}` : '',
+      actionText(currentAction) ? `Line: ${actionText(currentAction)}` : '',
+      kind === 'bg'
+        ? 'Create a visual novel background for this scene. Avoid characters unless the line explicitly asks for a CG.'
+        : kind === 'char'
+          ? 'Create a reusable visual novel character sprite variant. Focus on expression, pose, emotion, lighting, and camera.'
+          : 'Create a voice direction. Focus on tone, pacing, emotion, and delivery.'
+    ];
+    return parts.filter(Boolean).join('\n');
+  };
+
+  const openResourcePrompt = (kind: PickerKind, regenerate = false) => {
+    setResourcePromptDraft({
+      open: true,
+      kind,
+      regenerate,
+      prompt: buildResourcePrompt(kind)
+    });
+  };
+
+  const requestGenerateResource = async (kind: PickerKind, regenerate = false, promptOverride?: string) => {
     if (!currentAction) return;
     const lineText = actionText(currentAction);
-    const resourcePrompt = lineText || activeNode?.title || project.title || 'visual novel resource';
-    const projectId = project.id || 'workspace_default';
+    const resourcePrompt = promptOverride?.trim() || buildResourcePrompt(kind) || lineText || activeNode?.title || project.title || 'visual novel resource';
+    const projectId = projectStorageId || 'workspace_default';
     const sourceAsset = resourceForKind(kind);
 
     const endpoint = kind === 'bg'
@@ -3838,7 +4287,7 @@ export function Workstation() {
           </button>
           <button
             type="button"
-            onClick={() => requestGenerateResource(kind, true)}
+            onClick={() => openResourcePrompt(kind, true)}
             disabled={!currentAction || !asset}
             className="h-8 rounded-full border border-white/10 text-xs text-white/50 hover:border-white/30 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -4203,7 +4652,15 @@ export function Workstation() {
           >
             <PanelLeft className="w-5 h-5" />
           </button>
-          <h1 className="min-w-0 truncate text-sm font-medium">{project.title}</h1>
+          <h1 data-testid="workstation-project-title" className="min-w-0 truncate text-sm font-medium">{project.title}</h1>
+          <div className={`hidden shrink-0 items-center gap-1 rounded-full border px-2 py-1 text-[10px] md:flex ${persistenceClass(projectPersistenceStatus)}`}>
+            {projectPersistenceStatus === 'synced' ? <CheckCircle2 className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+            <span>{persistenceLabel(projectPersistenceStatus, locale)}</span>
+          </div>
+          <div className={`hidden shrink-0 items-center gap-1 rounded-full border px-2 py-1 text-[10px] lg:flex ${persistenceClass(saveSlotPersistenceStatus)}`}>
+            <Save className="h-3 w-3" />
+            <span>{locale === 'zh-CN' ? '存档' : 'Saves'} · {persistenceLabel(saveSlotPersistenceStatus, locale)}</span>
+          </div>
         </div>
         
         <div className="flex shrink-0 items-center gap-2 xl:gap-4">
@@ -4231,14 +4688,6 @@ export function Workstation() {
             <Link2 className="w-3 h-3" />
             <span className="hidden sm:inline">{t('sceneMap')}</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setSaveLoadOpen(true)}
-            className="h-8 px-3 xl:px-4 rounded-full border border-white/20 text-xs font-medium hover:bg-white/5 transition-colors flex items-center gap-2"
-          >
-            <Save className="w-3 h-3" />
-            <span className="hidden sm:inline">{t('saveLoad')}</span>
-          </button>
           <Link to="/asset-lab" className="h-8 px-3 xl:px-4 rounded-full border border-white/20 text-xs font-medium hover:bg-white/5 transition-colors flex items-center gap-2">
             <ImageIcon className="w-3 h-3" />
             <span className="hidden md:inline">{t('assetLab')}</span>
@@ -4254,30 +4703,43 @@ export function Workstation() {
             className="hidden"
             onChange={handleProjectFileChange}
           />
-          <button
-            type="button"
-            onClick={() => projectFileInputRef.current?.click()}
-            className="h-8 px-3 xl:px-4 rounded-full border border-white/20 text-xs font-medium hover:bg-white/5 transition-colors flex items-center gap-2"
-          >
-            <Upload className="w-3 h-3" />
-            <span className="hidden sm:inline">{t('import')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={exportProjectJson}
-            className="h-8 px-3 xl:px-4 rounded-full border border-white/20 text-xs font-medium hover:bg-white/5 transition-colors flex items-center gap-2"
-          >
-            <Download className="w-3 h-3" />
-            <span className="hidden sm:inline">{t('exportJson')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={exportPlayableHtml}
-            className="h-8 px-3 xl:px-4 rounded-full bg-primary text-black text-xs font-medium hover:bg-primary/90 transition-colors flex items-center gap-2"
-          >
-            <Monitor className="w-3 h-3" />
-            <span className="hidden sm:inline">{t('exportPlayable')}</span>
-          </button>
+          <div className="group relative">
+            <button
+              type="button"
+              className="h-8 px-3 xl:px-4 rounded-full border border-white/20 text-xs font-medium hover:bg-white/5 transition-colors flex items-center gap-2"
+              aria-label={t('importExport')}
+            >
+              <Upload className="w-3 h-3" />
+              <span className="hidden sm:inline">{t('importExport')}</span>
+              <ChevronRight className="h-3 w-3 rotate-90 text-white/35 transition-transform group-hover:-rotate-90" />
+            </button>
+            <div className="invisible absolute right-0 top-full z-40 mt-2 w-52 translate-y-1 rounded-xl border border-white/10 bg-black/95 p-1.5 opacity-0 shadow-2xl backdrop-blur-xl transition-all duration-150 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100">
+              <button
+                type="button"
+                onClick={() => projectFileInputRef.current?.click()}
+                className="flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-xs text-white/70 transition-colors hover:bg-white/10 hover:text-primary"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                {t('import')}
+              </button>
+              <button
+                type="button"
+                onClick={exportProjectJson}
+                className="flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-xs text-white/70 transition-colors hover:bg-white/10 hover:text-primary"
+              >
+                <Download className="h-3.5 w-3.5" />
+                {t('exportJson')}
+              </button>
+              <button
+                type="button"
+                onClick={exportPlayableHtml}
+                className="flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-xs text-primary transition-colors hover:bg-primary/10"
+              >
+                <Monitor className="h-3.5 w-3.5" />
+                {t('exportPlayable')}
+              </button>
+            </div>
+          </div>
           <div className="h-4 w-px shrink-0 bg-white/20" />
           <button 
             onClick={() => setRightSidebarOpen(!rightSidebarOpen)}
@@ -4289,12 +4751,18 @@ export function Workstation() {
       </header>
 
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <aside className={`shrink-0 border-r border-white/10 flex flex-col bg-black/50 transition-all duration-300 ${leftSidebarOpen ? 'w-[min(16rem,32vw)] min-w-[13rem]' : 'w-0 min-w-0 overflow-hidden border-none'}`}>
+        <aside
+          className={`shrink-0 border-r border-white/10 flex flex-col bg-black/50 ${resizingPanel ? '' : 'transition-[width,min-width] duration-200'} ${leftSidebarOpen ? '' : 'overflow-hidden border-none'}`}
+          style={{
+            width: leftSidebarOpen ? leftSidebarWidth : 0,
+            minWidth: leftSidebarOpen ? MIN_LEFT_SIDEBAR_WIDTH : 0
+          }}
+        >
           <div className="h-full w-full min-w-0 flex flex-col">
             <div className="p-4 border-b border-white/10 flex flex-col gap-3">
-              <h2 className="text-xs font-medium text-white/70 uppercase tracking-wider">{t('storyGeneration')}</h2>
+              <h2 className="text-xs font-medium text-white/70 uppercase tracking-wider">剧情预处理</h2>
               <textarea 
-                rows={2} 
+                rows={3} 
                 className="w-full bg-white/5 border border-white/10 rounded overflow-y-auto text-xs p-2 text-white/90 placeholder-white/30 resize-none focus:outline-none focus:border-white/30"
                 placeholder={t('storyPromptPlaceholder')}
                 value={promptInput}
@@ -4306,8 +4774,57 @@ export function Workstation() {
                 className="w-full h-8 rounded bg-white/10 hover:bg-white/20 text-xs font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {isGenerating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                {t('generateScene')}
+                {isGenerating ? '解析中' : '解析剧情'}
               </button>
+              {preprocessDraft && (
+                <div className="rounded-lg border border-primary/25 bg-primary/[0.06] p-3 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-white/85">
+                        {preprocessDraft.mode === 'multi_scene' ? '多场景草稿' : '单场景草稿'}
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-white/45">
+                        {preprocessDraft.review.summary || preprocessDraft.script?.title || 'AI 已完成结构预处理'}
+                      </div>
+                    </div>
+                    <span className="shrink-0 rounded-full border border-white/10 px-2 py-1 text-[10px] text-white/55">
+                      {preprocessDraft.review.sceneCount || preprocessScenes.length || 0} 场
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-center text-[10px] text-white/45">
+                    <div className="rounded border border-white/10 bg-black/20 p-1.5">
+                      <div className="text-white/75">{preprocessDraft.review.actionCount || 0}</div>
+                      <div>动作</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/20 p-1.5">
+                      <div className="text-white/75">{preprocessDraft.review.assetTaskCount || 0}</div>
+                      <div>图片</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/20 p-1.5">
+                      <div className="text-white/75">{preprocessDraft.review.voiceTaskCount || 0}</div>
+                      <div>语音</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPreprocessReviewOpen(true)}
+                      className="h-8 rounded-full border border-white/10 text-[11px] text-white/70 hover:border-primary hover:text-primary"
+                    >
+                      审阅修改
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => commitPreprocessDraft()}
+                      disabled={isCommittingDraft}
+                      className="flex h-8 items-center justify-center gap-1 rounded-full bg-primary text-[11px] font-medium text-black hover:bg-primary/90 disabled:opacity-60"
+                    >
+                      {isCommittingDraft && <RefreshCw className="h-3 w-3 animate-spin" />}
+                      同意生成
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="text-[10px] text-white/35 leading-relaxed">
                 <div>{t('status')}: <span className="text-white/60">{project.generationStatus || 'idle'}</span></div>
                 {project.requestId && <div className="truncate">{t('request')}: {project.requestId}</div>}
@@ -4604,11 +5121,49 @@ export function Workstation() {
           </div>
         </aside>
 
+        {leftSidebarOpen && (
+          <button
+            type="button"
+            onPointerDown={event => beginWorkbenchResize(event, 'left')}
+            className={`group relative z-20 w-2 shrink-0 cursor-col-resize transition-colors ${resizingPanel === 'left' ? 'bg-primary/10' : 'bg-transparent hover:bg-primary/5'}`}
+            aria-label={t('resizePanel')}
+          >
+            <span className={`absolute left-1/2 top-0 h-full w-px -translate-x-1/2 transition-colors ${resizingPanel === 'left' ? 'bg-primary' : 'bg-white/10 group-hover:bg-primary/70'}`} />
+          </button>
+        )}
+
         <main className="min-w-0 flex-1 relative flex flex-col bg-[#0a0a0a]">
           <div
             className={`flex-1 relative overflow-hidden flex items-center justify-center ${isPlaying ? 'cursor-pointer' : ''}`}
             onClick={advancePlaytest}
           >
+            {isPlaying && (
+              <div className="absolute left-4 top-4 z-20 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={event => {
+                    event.stopPropagation();
+                    rollbackRuntime();
+                  }}
+                  disabled={runtimeBackStack.length === 0}
+                  className="flex h-8 items-center gap-1 rounded-full border border-white/15 bg-black/60 px-3 text-xs text-white/70 backdrop-blur hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                  {t('rollback')}
+                </button>
+                <button
+                  type="button"
+                  onClick={event => {
+                    event.stopPropagation();
+                    setSaveLoadOpen(true);
+                  }}
+                  className="flex h-8 items-center gap-1 rounded-full border border-white/15 bg-black/60 px-3 text-xs text-white/70 backdrop-blur hover:border-primary hover:text-primary"
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  {t('saveLoad')}
+                </button>
+              </div>
+            )}
             <div 
               className="absolute inset-0 bg-[#202124] bg-cover bg-center opacity-100"
               style={{ backgroundImage: activeBg ? `url(${activeBg})` : undefined }}
@@ -4681,7 +5236,20 @@ export function Workstation() {
             )}
           </div>
 
-          <div className={`shrink-0 border-t border-white/10 bg-black/80 backdrop-blur-xl transition-all duration-300 ${timelineVisible ? (timelineMode === 'timeline' ? 'h-[28rem]' : 'h-60') : 'h-12'}`}>
+          <div
+            className={`relative shrink-0 border-t border-white/10 bg-black/80 backdrop-blur-xl ${resizingPanel === 'timeline' ? '' : 'transition-[height] duration-200'}`}
+            style={{ height: timelineVisible ? timelineHeight : 48 }}
+          >
+            {timelineVisible && (
+              <button
+                type="button"
+                onPointerDown={event => beginWorkbenchResize(event, 'timeline')}
+                className={`group absolute -top-1 left-0 right-0 z-30 h-3 cursor-row-resize ${resizingPanel === 'timeline' ? 'bg-primary/10' : 'hover:bg-primary/5'}`}
+                aria-label={t('resizePanel')}
+              >
+                <span className={`absolute left-0 right-0 top-1/2 h-px -translate-y-1/2 transition-colors ${resizingPanel === 'timeline' ? 'bg-primary' : 'bg-white/10 group-hover:bg-primary/70'}`} />
+              </button>
+            )}
             <div className="h-12 px-4 flex items-center justify-between border-b border-white/5 cursor-pointer" onClick={() => setTimelineVisible(!timelineVisible)}>
               <div className="flex min-w-0 items-center gap-2 text-xs font-medium text-white/70">
                 <AlignLeft className="w-4 h-4 shrink-0" />
@@ -4825,44 +5393,48 @@ export function Workstation() {
                       {
                         id: 'script',
                         label: t('scriptTrack'),
-                        clips: timedActions.map(item => ({
-                          ...item,
-                          label: actionText(item.action) || item.action.id,
-                          className: 'border-primary/35 bg-primary/15 text-primary'
-                        }))
+                        clips: timedActions.map(item => makeTimelineClip(
+                          item,
+                          actionText(item.action) || item.action.id,
+                          'border-primary/35 bg-primary/15 text-primary',
+                          'script'
+                        ))
                       },
                       {
                         id: 'background',
                         label: t('backgroundTrack'),
                         clips: timedActions
                           .filter(item => item.action.bgAssetId || item.action.bgImage)
-                          .map(item => ({
-                            ...item,
-                            label: t('background'),
-                            className: 'border-cyan-300/25 bg-cyan-300/10 text-cyan-100'
-                          }))
+                          .map(item => makeTimelineClip(
+                            item,
+                            t('background'),
+                            'border-cyan-300/25 bg-cyan-300/10 text-cyan-100',
+                            'background'
+                          ))
                       },
                       {
                         id: 'character',
                         label: t('characterTrack'),
                         clips: timedActions
                           .filter(item => item.action.charAssetId || item.action.charImage)
-                          .map(item => ({
-                            ...item,
-                            label: item.action.speaker || t('characterSprite'),
-                            className: 'border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100'
-                          }))
+                          .map(item => makeTimelineClip(
+                            item,
+                            item.action.speaker || t('characterSprite'),
+                            'border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100',
+                            'character'
+                          ))
                       },
                       {
                         id: 'voice',
                         label: t('voiceTrack'),
                         clips: timedActions
                           .filter(item => Boolean(audioForAction(item.action)))
-                          .map(item => ({
-                            ...item,
-                            label: audioLabelForAction(item.action),
-                            className: 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
-                          }))
+                          .map(item => makeTimelineClip(
+                            item,
+                            audioLabelForAction(item.action),
+                            'border-emerald-300/25 bg-emerald-300/10 text-emerald-100',
+                            'voice'
+                          ))
                       },
                       {
                         id: 'choice',
@@ -4871,6 +5443,9 @@ export function Workstation() {
                           .filter(item => item.action.type === 'choice' || (item.action.choices?.length ?? 0) > 0)
                           .map(item => ({
                             ...item,
+                            track: 'script' as VNTimelineTrack,
+                            lane: Number.isFinite(Number(item.action.lane)) ? Number(item.action.lane) : 0,
+                            locked: Boolean(item.action.locked),
                             label: `${t('choices')} · ${(item.action.choices || []).length}`,
                             className: 'border-amber-300/30 bg-amber-300/10 text-amber-100'
                           }))
@@ -4935,7 +5510,24 @@ export function Workstation() {
           </div>
         </main>
 
-        <aside className={`shrink-0 border-l border-white/10 bg-black/60 flex flex-col transition-all duration-300 ${rightSidebarOpen ? 'w-[clamp(16rem,24vw,22rem)] min-w-[16rem]' : 'w-0 min-w-0 overflow-hidden border-none'}`}>
+        {rightSidebarOpen && (
+          <button
+            type="button"
+            onPointerDown={event => beginWorkbenchResize(event, 'right')}
+            className={`group relative z-20 w-2 shrink-0 cursor-col-resize transition-colors ${resizingPanel === 'right' ? 'bg-primary/10' : 'bg-transparent hover:bg-primary/5'}`}
+            aria-label={t('resizePanel')}
+          >
+            <span className={`absolute left-1/2 top-0 h-full w-px -translate-x-1/2 transition-colors ${resizingPanel === 'right' ? 'bg-primary' : 'bg-white/10 group-hover:bg-primary/70'}`} />
+          </button>
+        )}
+
+        <aside
+          className={`shrink-0 border-l border-white/10 bg-black/60 flex flex-col ${resizingPanel ? '' : 'transition-[width,min-width] duration-200'} ${rightSidebarOpen ? '' : 'overflow-hidden border-none'}`}
+          style={{
+            width: rightSidebarOpen ? rightSidebarWidth : 0,
+            minWidth: rightSidebarOpen ? MIN_RIGHT_SIDEBAR_WIDTH : 0
+          }}
+        >
           <div className="h-full w-full min-w-0 flex flex-col">
             <div className="shrink-0 border-b border-white/10 p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
@@ -5041,6 +5633,28 @@ export function Workstation() {
                               <option key={node.id} value={node.id}>{node.title}</option>
                             ))}
                         </select>
+                        <div className="grid grid-cols-2 gap-2">
+                          <select
+                            className="h-9 min-w-0 rounded border border-white/10 bg-black px-3 text-xs text-white/75 outline-none focus:border-primary"
+                            value={activeNode?.backgroundAssetId || ''}
+                            onChange={event => activeNodeId && updateNode(activeNodeId, { backgroundAssetId: event.target.value || undefined })}
+                          >
+                            <option value="">{t('background')}</option>
+                            {project.assets.filter(asset => asset.type === 'bg').map(asset => (
+                              <option key={asset.id} value={asset.id}>{asset.name}</option>
+                            ))}
+                          </select>
+                          <select
+                            className="h-9 min-w-0 rounded border border-white/10 bg-black px-3 text-xs text-white/75 outline-none focus:border-primary"
+                            value={activeNode?.bgmAssetId || ''}
+                            onChange={event => activeNodeId && updateNode(activeNodeId, { bgmAssetId: event.target.value || undefined })}
+                          >
+                            <option value="">BGM</option>
+                            {project.assets.filter(asset => asset.type === 'audio').map(asset => (
+                              <option key={asset.id} value={asset.id}>{asset.name}</option>
+                            ))}
+                          </select>
+                        </div>
                         <button
                           type="button"
                           onClick={() => activeNode && createEmptyScene({ fromSceneId: activeNode.id, defaultNext: true })}
@@ -5100,7 +5714,10 @@ export function Workstation() {
                               step={0.25}
                               className="h-9 w-full rounded border border-white/10 bg-black px-3 text-xs text-white/80 outline-none focus:border-primary"
                               value={currentAction.startTime ?? activeTimedAction?.startTime ?? 0}
-                              onChange={event => updateAction({ startTime: normalizeOptionalSeconds(event.target.value) || 0 })}
+                              onChange={event => {
+                                const startTime = normalizeOptionalSeconds(event.target.value) || 0;
+                                updateAction({ start: startTime, startTime });
+                              }}
                             />
                           </div>
                           <div className="space-y-2">
@@ -5114,6 +5731,35 @@ export function Workstation() {
                               onChange={event => updateAction({ duration: normalizeDurationSeconds(event.target.value, DEFAULT_ACTION_DURATION) })}
                             />
                           </div>
+                        </div>
+                        <div className="grid grid-cols-[1fr_5rem_auto] gap-2">
+                          <select
+                            className="h-9 min-w-0 rounded border border-white/10 bg-black px-3 text-xs text-white/75 outline-none focus:border-primary"
+                            value={currentAction.track || defaultTimelineTrack(currentAction)}
+                            onChange={event => updateAction({ track: normalizeTimelineTrack(event.target.value) })}
+                          >
+                            {(['script', 'background', 'character', 'voice', 'bgm', 'sfx', 'fx'] as VNTimelineTrack[]).map(track => (
+                              <option key={track} value={track}>{track}</option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            className="h-9 rounded border border-white/10 bg-black px-3 text-xs text-white/80 outline-none focus:border-primary"
+                            value={currentAction.lane ?? 0}
+                            onChange={event => updateAction({ lane: Math.max(0, Number(event.target.value || 0)) })}
+                            aria-label={t('lane')}
+                          />
+                          <label className="flex h-9 items-center gap-2 rounded border border-white/10 bg-black px-3 text-[10px] text-white/60">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-primary"
+                              checked={Boolean(currentAction.locked)}
+                              onChange={event => updateAction({ locked: event.target.checked })}
+                            />
+                            {t('locked')}
+                          </label>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <button
@@ -5949,6 +6595,191 @@ export function Workstation() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {preprocessReviewOpen && preprocessDraft && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-6 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setPreprocessReviewOpen(false)}
+          >
+            <motion.div
+              className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-white/10 bg-[#090909] shadow-2xl"
+              initial={{ opacity: 0, y: 18, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 18, scale: 0.98 }}
+              onClick={event => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-4 border-b border-white/10 p-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium text-white/85">
+                    <Wand2 className="h-4 w-4 text-primary" />
+                    剧情预处理审阅
+                  </div>
+                  <div className="mt-1 truncate text-xs text-white/35">
+                    {preprocessDraft.script?.title || preprocessDraft.projectId} · {preprocessDraft.review.sceneCount || preprocessScenes.length || 0} 场景
+                  </div>
+                </div>
+                <button type="button" onClick={() => setPreprocessReviewOpen(false)} className="rounded-full p-1 text-white/45 hover:bg-white/10 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[18rem_1fr]">
+                <aside className="min-h-0 border-b border-white/10 p-4 md:border-b-0 md:border-r">
+                  <div className="grid grid-cols-2 gap-2 text-center text-[10px] text-white/45">
+                    <div className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <div className="text-sm text-white/80">{preprocessDraft.review.characterCount || 0}</div>
+                      <div>角色</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <div className="text-sm text-white/80">{preprocessDraft.review.actionCount || 0}</div>
+                      <div>动作</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <div className="text-sm text-white/80">{preprocessDraft.review.assetTaskCount || 0}</div>
+                      <div>图片任务</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-white/[0.03] p-2">
+                      <div className="text-sm text-white/80">{preprocessDraft.review.voiceTaskCount || 0}</div>
+                      <div>语音任务</div>
+                    </div>
+                  </div>
+                  <div className="mt-4 max-h-[48vh] space-y-2 overflow-y-auto pr-1">
+                    {preprocessScenes.map((scene: any, index: number) => {
+                      const sceneId = pickText(scene?.id, scene?.scene_id) || `draft_scene_${index}`;
+                      const selected = sceneId === pickText(selectedDraftScene?.id, selectedDraftScene?.scene_id);
+                      return (
+                        <button
+                          key={sceneId}
+                          type="button"
+                          onClick={() => setSelectedDraftSceneId(sceneId)}
+                          className={`w-full rounded-lg border p-3 text-left transition-colors ${selected ? 'border-primary/60 bg-primary/[0.08]' : 'border-white/10 bg-white/[0.03] hover:border-white/25'}`}
+                        >
+                          <div className="truncate text-xs font-medium text-white/80">{scene?.title || scene?.name || `Scene ${index + 1}`}</div>
+                          <div className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-white/40">{scene?.summary || sceneId}</div>
+                          <div className="mt-2 text-[10px] text-white/30">{Array.isArray(scene?.actions) ? scene.actions.length : 0} actions</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </aside>
+
+                <div className="min-h-0 overflow-y-auto p-4">
+                  {selectedDraftScene ? (
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <label className="block">
+                            <span className="text-[10px] uppercase tracking-widest text-white/35">场景标题</span>
+                            <input
+                              className="mt-1 h-9 w-full rounded border border-white/10 bg-black/40 px-3 text-sm text-white/80 outline-none focus:border-primary"
+                              value={selectedDraftScene.title || selectedDraftScene.name || ''}
+                              onChange={event => updateDraftScene(pickText(selectedDraftScene.id, selectedDraftScene.scene_id), { title: event.target.value })}
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="text-[10px] uppercase tracking-widest text-white/35">类型</span>
+                            <select
+                              className="mt-1 h-9 w-full rounded border border-white/10 bg-black/40 px-3 text-sm text-white/80 outline-none focus:border-primary"
+                              value={selectedDraftScene.type || 'normal'}
+                              onChange={event => updateDraftScene(pickText(selectedDraftScene.id, selectedDraftScene.scene_id), { type: event.target.value })}
+                            >
+                              <option value="normal">normal</option>
+                              <option value="branch">branch</option>
+                              <option value="ending">ending</option>
+                              <option value="menu">menu</option>
+                              <option value="system">system</option>
+                            </select>
+                          </label>
+                        </div>
+                        <label className="mt-3 block">
+                          <span className="text-[10px] uppercase tracking-widest text-white/35">摘要</span>
+                          <textarea
+                            className="mt-1 min-h-20 w-full resize-none rounded border border-white/10 bg-black/40 p-3 text-sm leading-relaxed text-white/80 outline-none focus:border-primary"
+                            value={selectedDraftScene.summary || ''}
+                            onChange={event => updateDraftScene(pickText(selectedDraftScene.id, selectedDraftScene.scene_id), { summary: event.target.value })}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="space-y-2">
+                        {(Array.isArray(selectedDraftScene.actions) ? selectedDraftScene.actions : []).map((action: any, index: number) => {
+                          const sceneId = pickText(selectedDraftScene.id, selectedDraftScene.scene_id);
+                          const actionId = pickText(action?.id, action?.action_id) || `draft_action_${index}`;
+                          return (
+                            <article key={actionId} className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
+                              <div className="mb-2 flex items-center justify-between gap-2 text-[10px] text-white/35">
+                                <span>{action.type || action.action_type || 'line'} · #{index + 1}</span>
+                                <span className="truncate">{actionId}</span>
+                              </div>
+                              <div className="grid gap-2 md:grid-cols-[10rem_1fr]">
+                                <input
+                                  className="h-8 rounded border border-white/10 bg-black/40 px-2 text-xs text-white/75 outline-none focus:border-primary"
+                                  value={action.speaker || action.speaker_name || action.speaker_id || ''}
+                                  onChange={event => updateDraftAction(sceneId, actionId, { speaker: event.target.value })}
+                                  placeholder="speaker"
+                                />
+                                <textarea
+                                  className="min-h-16 resize-none rounded border border-white/10 bg-black/40 p-2 text-xs leading-relaxed text-white/75 outline-none focus:border-primary"
+                                  value={action.text || action.dialogue || action.line || ''}
+                                  onChange={event => updateDraftAction(sceneId, actionId, { text: event.target.value })}
+                                  placeholder="action text"
+                                />
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex min-h-72 items-center justify-center rounded-lg border border-dashed border-white/10 text-xs text-white/35">
+                      没有可审阅的场景
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 p-4">
+                <div className="text-xs text-white/35">
+                  确认后才会保存项目，并投递图片与语音生成任务。
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPreprocessReviewOpen(false)}
+                    className="h-9 rounded-full border border-white/10 px-4 text-xs text-white/60 hover:border-white/30 hover:text-white"
+                  >
+                    继续编辑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPreprocessDraft(null);
+                      setPreprocessReviewOpen(false);
+                      setSelectedDraftSceneId('');
+                    }}
+                    className="h-9 rounded-full border border-red-400/25 px-4 text-xs text-red-200/75 hover:border-red-300/60 hover:text-red-100"
+                  >
+                    丢弃草稿
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => commitPreprocessDraft()}
+                    disabled={isCommittingDraft}
+                    className="flex h-9 items-center justify-center gap-2 rounded-full bg-primary px-4 text-xs font-medium text-black hover:bg-primary/90 disabled:opacity-60"
+                  >
+                    {isCommittingDraft && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                    同意并生成
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {saveLoadOpen && (
           <motion.div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm"
@@ -5971,6 +6802,10 @@ export function Workstation() {
                     {t('saveLoad')}
                   </div>
                   <div className="mt-1 truncate text-xs text-white/35">{project.title} · {projectStorageId}</div>
+                  <div className={`mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${persistenceClass(saveSlotPersistenceStatus)}`}>
+                    <Save className="h-3 w-3" />
+                    {persistenceLabel(saveSlotPersistenceStatus, locale)}
+                  </div>
                 </div>
                 <button type="button" onClick={() => setSaveLoadOpen(false)} className="rounded-full p-1 text-white/45 hover:bg-white/10 hover:text-white">
                   <X className="h-4 w-4" />
@@ -6073,6 +6908,68 @@ export function Workstation() {
                       })}
                     </div>
                   )}
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {resourcePromptDraft?.open && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setResourcePromptDraft(null)}
+          >
+            <motion.div
+              className="w-full max-w-2xl overflow-hidden rounded-xl border border-white/10 bg-[#090909] shadow-2xl"
+              initial={{ opacity: 0, y: 18, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 18, scale: 0.98 }}
+              onClick={event => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-4 border-b border-white/10 p-4">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-white/85">
+                    {t('regeneratePrompt')} · {resourceLabel(resourcePromptDraft.kind, locale)}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-white/35">{currentAction?.id || t('noAction')}</div>
+                </div>
+                <button type="button" onClick={() => setResourcePromptDraft(null)} className="rounded-full p-1 text-white/45 hover:bg-white/10 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="space-y-4 p-4">
+                <textarea
+                  className="min-h-56 w-full resize-none rounded-lg border border-white/10 bg-black p-3 text-sm leading-relaxed text-white/80 outline-none placeholder:text-white/25 focus:border-primary"
+                  value={resourcePromptDraft.prompt}
+                  onChange={event => setResourcePromptDraft(draft => draft ? { ...draft, prompt: event.target.value } : draft)}
+                  placeholder={t('regeneratePromptPlaceholder')}
+                  autoFocus
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setResourcePromptDraft(null)}
+                    className="h-9 rounded-full border border-white/10 px-4 text-xs text-white/55 hover:border-white/30 hover:text-white"
+                  >
+                    {t('cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const draft = resourcePromptDraft;
+                      if (!draft) return;
+                      setResourcePromptDraft(null);
+                      requestGenerateResource(draft.kind, draft.regenerate, draft.prompt);
+                    }}
+                    className="h-9 rounded-full bg-primary px-4 text-xs font-medium text-black hover:bg-primary/90"
+                  >
+                    {resourcePromptDraft.regenerate ? t('regenerate') : t('generate')}
+                  </button>
                 </div>
               </div>
             </motion.div>
