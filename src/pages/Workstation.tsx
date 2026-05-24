@@ -545,7 +545,9 @@ function normalizeProjectState(rawProject: any): VNProjectState {
     scenes: nodes,
     nodes,
     sceneLinks: deriveSceneLinks(nodes),
-    assets: Array.isArray(rawProject?.assets) ? rawProject.assets : [],
+    assets: Array.isArray(rawProject?.assets)
+      ? rawProject.assets.map(normalizeWorkspaceAsset).filter(asset => asset.id)
+      : [],
     variables: Array.isArray(rawProject?.variables)
       ? rawProject.variables.map((variable: any, index: number) => normalizeVariableDefinition(variable, index))
       : [],
@@ -734,6 +736,7 @@ function projectForPersistence(project: VNProjectState): VNProjectState {
     id: project.id || projectId,
     nodes,
     scenes: nodes,
+    assets: project.assets.map(normalizeWorkspaceAsset),
     sceneLinks: deriveSceneLinks(nodes)
   };
 }
@@ -1251,15 +1254,48 @@ function createProjectId() {
   return `web_mvp_${stamp}`;
 }
 
-function normalizeAssetKind(assetType?: string): VNAsset['type'] {
-  const value = String(assetType || '').toLowerCase();
-  if (value.includes('voice') || value.includes('audio')) return 'audio';
-  if (value.includes('character') || value.includes('sprite') || value.includes('variant')) return 'char';
+function normalizeAssetKind(...values: unknown[]): VNAsset['type'] {
+  const value = values
+    .flatMap(item => {
+      if (!item) return [];
+      if (typeof item === 'object') return Object.values(item as Record<string, unknown>);
+      return [item];
+    })
+    .map(item => String(item || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/[-\s]+/g, '_');
+
+  if (/(voice|audio|sound|wav|mp3|character_voice|语音|声音)/.test(value)) return 'audio';
+
+  const charHints = [
+    'character', 'sprite', 'variant', 'portrait', 'avatar', 'cutout', 'full_body',
+    'asset_sprite', '_sprite', 'char_', 'heroine', 'protagonist', '立绘', '角色', '人物'
+  ];
+  const bgHints = [
+    'background', 'asset_bg', '_bg_', 'bg_', 'scene_bg', 'environment', 'stage',
+    'corridor', 'classroom', 'room', 'hallway', '场景', '背景', '走廊', '教室', '房间'
+  ];
+  const charScore = charHints.reduce((score, hint) => score + (value.includes(hint) ? 1 : 0), 0);
+  const bgScore = bgHints.reduce((score, hint) => score + (value.includes(hint) ? 1 : 0), 0);
+
+  if (charScore > bgScore) return 'char';
+  if (bgScore > 0) return 'bg';
+  if (charScore > 0) return 'char';
   return 'bg';
 }
 
 function normalizeRemoteAssetKind(record: UserAssetRecord): VNAsset['type'] {
-  return normalizeAssetKind(record.asset_type || String(record.metadata?.asset_type || ''));
+  return normalizeAssetKind(
+    record.asset_type,
+    record.asset_id,
+    record.source_task_id,
+    record.name,
+    record.character_id,
+    record.metadata?.asset_type,
+    record.metadata?.source_task_id,
+    record.metadata?.provider_asset_id
+  );
 }
 
 function displayRemoteAssetUrl(record?: UserAssetRecord) {
@@ -1284,6 +1320,50 @@ function toWorkspaceAsset(record: UserAssetRecord, forcedType?: PickerKind): VNA
   };
 }
 
+function normalizeWorkspaceAsset(rawAsset: any): VNAsset {
+  const metadata = rawAsset?.metadata && typeof rawAsset.metadata === 'object'
+    ? rawAsset.metadata as Record<string, unknown>
+    : {};
+  const id = pickText(rawAsset?.id, rawAsset?.asset_id, rawAsset?.task_id, rawAsset?.sourceTaskId, rawAsset?.source_task_id);
+  const status = pickText(rawAsset?.status).toLowerCase();
+  const normalizedStatus: VNAsset['status'] = status.includes('fail') || status.includes('error')
+    ? 'failed'
+    : status.includes('ready') || status.includes('success') || status.includes('succeed')
+      ? 'ready'
+      : status.includes('pending') || status.includes('queued') || status.includes('running')
+        ? 'pending'
+        : rawAsset?.url || rawAsset?.absolute_url || rawAsset?.cos_public_url
+          ? 'ready'
+          : 'pending';
+
+  return {
+    ...(rawAsset || {}),
+    id,
+    sourceTaskId: pickText(rawAsset?.sourceTaskId, rawAsset?.source_task_id, rawAsset?.task_id, rawAsset?.asset_id, metadata.source_task_id) || id,
+    type: normalizeAssetKind(
+      rawAsset?.assetType,
+      rawAsset?.asset_type,
+      rawAsset?.type,
+      id,
+      rawAsset?.sourceTaskId,
+      rawAsset?.source_task_id,
+      rawAsset?.name,
+      rawAsset?.characterId,
+      rawAsset?.character_id,
+      metadata.asset_type,
+      metadata.source_task_id,
+      metadata.provider_asset_id,
+      metadata.stable_asset_id
+    ),
+    name: pickText(rawAsset?.name, rawAsset?.asset_id, id) || id,
+    status: normalizedStatus,
+    url: pickText(rawAsset?.url, rawAsset?.absolute_url, rawAsset?.cos_public_url) || undefined,
+    characterId: pickText(rawAsset?.characterId, rawAsset?.character_id, metadata.character_id) || undefined,
+    assetType: pickText(rawAsset?.assetType, rawAsset?.asset_type, metadata.asset_type) || undefined,
+    metadata
+  };
+}
+
 function assetSearchText(asset: VNAsset | UserAssetRecord) {
   const isRemote = 'asset_id' in asset;
   return [
@@ -1293,6 +1373,11 @@ function assetSearchText(asset: VNAsset | UserAssetRecord) {
     isRemote ? asset.character_id : asset.characterId,
     isRemote ? undefined : asset.assetType
   ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function workspaceAssetRemoteUrl(asset?: VNAsset) {
+  const record = asset?.metadata?.user_asset_record as Record<string, unknown> | undefined;
+  return absoluteRemoteUrl(pickText(record?.absolute_url, record?.url, asset?.sourceUrl, asset?.url));
 }
 
 function resourceLabel(kind: PickerKind, locale: Locale = 'en-US') {
@@ -1311,6 +1396,13 @@ function buildVoiceUrl(requestId: string, index: number) {
   return `/generated/audio/${requestId}_line_${String(index + 1).padStart(3, '0')}.wav`;
 }
 
+const DEFAULT_CHARACTER_STYLE = 'clean anime visual novel sprite, crisp line art, soft cel shading, transparent PNG';
+const DEFAULT_BACKGROUND_STYLE_PROMPT = 'visual novel background, clean anime style, 16:9 composition';
+const CHARACTER_NEGATIVE_PROMPT = 'multiple people, extra character, duplicate, character sheet, text, watermark';
+const REMOTE_ASSET_TASK_POLL_MS = 2000;
+const REMOTE_ASSET_TASK_TIMEOUT_MS = 8 * 60 * 1000;
+const REMOTE_ASSET_TASK_STALE_MS = 3 * 60 * 1000;
+
 function toGeneratedImageUrl(record: any, sourceTask: any) {
   const result = record?.stableAsset || record?.assetResult || {};
   const directUrl = result.absolute_url || result.url || result.asset_url || result.image_url;
@@ -1327,8 +1419,155 @@ function toGeneratedImageUrl(record: any, sourceTask: any) {
 
 function sourceTaskForRecord(script: any, record: any) {
   const tasks = Array.isArray(script?.asset_tasks) ? script.asset_tasks : [];
+  const explicitId = pickText(
+    record?.sourceTaskId,
+    record?.source_task_id,
+    record?.stableAsset?.source_task_id,
+    record?.stableAsset?.task_id,
+    record?.stableAsset?.asset_id,
+    record?.sourceMessage?.task_id,
+    record?.sourceMessage?.taskId,
+    record?.assetResult?.source_task_id,
+    record?.assetResult?.task_id,
+    record?.assetResult?.asset_id
+  );
+  if (explicitId) {
+    const matched = tasks.find((task: any) => pickText(task?.task_id, task?.taskId, task?.asset_id, task?.assetId) === explicitId);
+    if (matched) return matched;
+  }
   const sequence = Number(record?.sequenceId || record?.sequence_id || 0);
   return sequence > 0 ? tasks[sequence - 1] : undefined;
+}
+
+function sourceVoiceTaskForRecord(script: any, record: any) {
+  const tasks = Array.isArray(script?.voice_tasks) ? script.voice_tasks : [];
+  const explicitId = pickText(
+    record?.sourceTaskId,
+    record?.source_task_id,
+    record?.stableAsset?.source_task_id,
+    record?.sourceMessage?.task_id,
+    record?.sourceMessage?.taskId
+  );
+  if (explicitId) {
+    const matched = tasks.find((task: any) => pickText(task?.task_id, task?.taskId, task?.asset_id, task?.assetId) === explicitId);
+    if (matched) return matched;
+  }
+  const actionId = pickText(record?.actionId, record?.action_id, record?.stableAsset?.action_id, record?.sourceMessage?.action_id, record?.sourceMessage?.actionId);
+  if (actionId) {
+    const matched = tasks.find((task: any) => pickText(task?.action_id, task?.actionId) === actionId);
+    if (matched) return matched;
+  }
+  const sequence = Number(record?.sequenceId || record?.sequence_id || 0);
+  return sequence > 0 ? tasks[sequence - 1] : undefined;
+}
+
+function toGeneratedAudioUrl(record: any, sourceTask: any) {
+  const result = record?.stableAsset || {};
+  const directUrl = result.absolute_url || result.url || result.audio_url || record?.absolute_url || record?.url || record?.audio_url;
+  if (typeof directUrl === 'string' && directUrl) {
+    return directUrl;
+  }
+  const requestId = pickText(record?.requestId, record?.request_id);
+  const sequence = Number(record?.sequenceId || record?.sequence_id || sourceTask?.sequenceId || sourceTask?.sequence_id || 0);
+  return requestId && sequence > 0 ? buildVoiceUrl(requestId, sequence - 1) : '';
+}
+
+function generationStatusForAssets(project: VNProjectState, assets: VNAsset[]): VNProjectState['generationStatus'] {
+  const normalizedAssets = assets.map(normalizeWorkspaceAsset);
+  const imageTarget = Number(project.imageTaskCount || 0);
+  const voiceTarget = Number(project.voiceTaskCount || 0);
+  const readyImages = normalizedAssets.filter(asset => asset.type !== 'audio' && asset.status === 'ready').length;
+  const readyVoices = normalizedAssets.filter(asset => asset.type === 'audio' && asset.status === 'ready').length;
+  const pendingTargets = normalizedAssets.filter(asset => asset.status !== 'ready' && asset.status !== 'failed').length;
+  const failedTargets = normalizedAssets.filter(asset => asset.status === 'failed').length;
+  if ((imageTarget || voiceTarget) && readyImages >= imageTarget && readyVoices >= voiceTarget) return 'done';
+  if ((imageTarget || voiceTarget) && pendingTargets === 0 && failedTargets > 0) return 'failed';
+  return project.generationStatus;
+}
+
+function apiData(payload: any) {
+  return payload?.data ?? payload;
+}
+
+function extractRemoteTaskId(payload: any) {
+  const data = apiData(payload);
+  return pickText(data?.task_id, data?.taskId, data?.id, data?.data?.task_id, data?.data?.taskId);
+}
+
+function extractRemoteResult(payload: any) {
+  const data = apiData(payload);
+  return data?.data || data?.result || data?.asset || data;
+}
+
+function remoteResultUrl(result: any) {
+  return pickText(result?.absolute_url, result?.url, result?.asset_url, result?.image_url, result?.audio_url);
+}
+
+function absoluteRemoteUrl(url: string) {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  return url.startsWith('/') ? `${window.location.origin}${url}` : url;
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function clonePlain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+function formatWorkerPayload(payload: Record<string, unknown>) {
+  return JSON.stringify(payload, null, 2);
+}
+
+function randomSeed() {
+  return Math.floor(Math.random() * 2147483647);
+}
+
+function readNestedPayload(asset?: VNAsset, key = 'submittedPayload') {
+  const metadata = (asset?.metadata || {}) as Record<string, any>;
+  const userRecord = metadata.user_asset_record || {};
+  const userMetadata = userRecord.metadata || {};
+  return metadata[key] || userMetadata[key] || undefined;
+}
+
+function imageRecordRemoteTaskId(record: any) {
+  return pickText(
+    record?.assetResult?.task_id,
+    record?.assetResult?.taskId,
+    record?.stableAsset?.task_id,
+    record?.stableAsset?.taskId,
+    record?.task_id,
+    record?.taskId
+  );
+}
+
+function assetRemoteTaskId(asset?: VNAsset) {
+  const metadata = (asset?.metadata || {}) as Record<string, any>;
+  return pickText(
+    metadata.taskId,
+    metadata.task_id,
+    metadata.remoteTaskId,
+    metadata.remote_task_id,
+    metadata.assetResult?.task_id,
+    metadata.assetResult?.taskId
+  );
+}
+
+function isManualOverrideAsset(asset?: VNAsset) {
+  const metadata = (asset?.metadata || {}) as Record<string, any>;
+  return metadata.manualOverride === true || metadata.generationSource === 'manual';
+}
+
+function remoteTaskFingerprint(payload: any) {
+  return [
+    pickText(payload?.status, payload?.data?.status),
+    pickText(payload?.updated_at, payload?.updatedAt, payload?.data?.updated_at, payload?.data?.updatedAt),
+    pickText(payload?.progress, payload?.data?.progress),
+    pickText(payload?.asset_id, payload?.assetId, payload?.data?.asset_id, payload?.data?.assetId),
+    remoteResultUrl(extractRemoteResult(payload))
+  ].filter(Boolean).join('|');
 }
 
 function extractChoiceOptions(sourceText: string) {
@@ -1451,6 +1690,40 @@ function scriptToProjectState(script: any, requestId: string, projectId: string,
       return !action.stage_id || action.stage_id === stageId;
     });
 
+    const actionsForStage = stageActions.map((action: any, actionIndex: number): VNAction => {
+      const spriteIds = action.sprite_asset_task_ids || action.sprite_asset_ids || [];
+      const layout = action.layout || {};
+      const voiceTask = voiceTaskByActionId.get(String(action.action_id || ''));
+      return {
+        id: action.id || action.action_id || `action_${stageIndex + 1}_${actionIndex + 1}`,
+        sourceActionId: action.action_id || action.id,
+        type: normalizeActionType(action.action_type || action.type),
+        speaker: action.speaker_name || action.speaker || action.speaker_id || 'Narrator',
+        text: action.text || action.dialogue || action.line || '',
+        emotion: action.emotion || '',
+        choices: (action.choice?.options || action.choices || []).map((choice: any) => ({
+          id: choice.id || choice.choice_id || createChoiceId(),
+          label: choice.label || choice.text || '',
+          nextId: choice.nextId,
+          targetActionId: choice.target_action_id || choice.targetActionId,
+          targetSceneId: choice.target_scene_id || choice.targetSceneId || choice.to_scene_id || choice.toSceneId,
+          conditions: Array.isArray(choice.conditions) ? choice.conditions.map((condition: any, index: number) => normalizeCondition(condition, index)) : undefined,
+          effects: Array.isArray(choice.effects) ? choice.effects.map((effect: any, index: number) => normalizeEffect(effect, index)) : undefined,
+          disabledText: choice.disabled_text || choice.disabledText
+        })),
+        targetSceneId: action.target_scene_id || action.targetSceneId,
+        targetActionId: action.target_action_id || action.targetActionId,
+        bgAssetId: action.background_asset_task_id || action.background_asset_id || action.bgAssetId || stage.background_asset_task_id || stage.background_asset_id || stage.backgroundAssetId,
+        charAssetId: spriteIds[0],
+        audioAssetId: action.voice_task_id || voiceTask?.task_id || voiceTask?.taskId || action.audio_asset_id || ((action.id || action.action_id) ? `voice_${action.id || action.action_id}` : undefined),
+        layout: {
+          x: Number(layout.x ?? positionToOffset(layout.position)),
+          y: Number(layout.y ?? 0),
+          scale: Number(layout.scale ?? 1)
+        }
+      };
+    });
+
     return {
       id: stage.scene_id || stage.stage_id || stage.id || `scene_${stageIndex + 1}`,
       title: stage.name || stage.title || `Generated Scene ${stageIndex + 1}`,
@@ -1462,39 +1735,7 @@ function scriptToProjectState(script: any, requestId: string, projectId: string,
       bgmAssetId: stage.bgm_asset_id || stage.bgmAssetId,
       tags: Array.isArray(stage.tags) ? stage.tags : [],
       position: normalizePosition(stage.position, stageIndex),
-      actions: stageActions.map((action: any, actionIndex: number): VNAction => {
-        const spriteIds = action.sprite_asset_task_ids || action.sprite_asset_ids || [];
-        const layout = action.layout || {};
-        const voiceTask = voiceTaskByActionId.get(String(action.action_id || ''));
-        return {
-          id: action.id || action.action_id || `action_${stageIndex + 1}_${actionIndex + 1}`,
-          sourceActionId: action.action_id || action.id,
-          type: normalizeActionType(action.action_type || action.type),
-          speaker: action.speaker_name || action.speaker || action.speaker_id || 'Narrator',
-          text: action.text || action.dialogue || action.line || '',
-          emotion: action.emotion || '',
-          choices: (action.choice?.options || action.choices || []).map((choice: any) => ({
-            id: choice.id || choice.choice_id || createChoiceId(),
-            label: choice.label || choice.text || '',
-            nextId: choice.nextId,
-            targetActionId: choice.target_action_id || choice.targetActionId,
-            targetSceneId: choice.target_scene_id || choice.targetSceneId || choice.to_scene_id || choice.toSceneId,
-            conditions: Array.isArray(choice.conditions) ? choice.conditions.map((condition: any, index: number) => normalizeCondition(condition, index)) : undefined,
-            effects: Array.isArray(choice.effects) ? choice.effects.map((effect: any, index: number) => normalizeEffect(effect, index)) : undefined,
-            disabledText: choice.disabled_text || choice.disabledText
-          })),
-          targetSceneId: action.target_scene_id || action.targetSceneId,
-          targetActionId: action.target_action_id || action.targetActionId,
-          bgAssetId: action.background_asset_task_id || action.background_asset_id || stage.background_asset_task_id || stage.background_asset_id,
-          charAssetId: spriteIds[0],
-          audioAssetId: action.voice_task_id || voiceTask?.task_id || voiceTask?.taskId || action.audio_asset_id || ((action.id || action.action_id) ? `voice_${action.id || action.action_id}` : undefined),
-          layout: {
-            x: Number(layout.x ?? positionToOffset(layout.position)),
-            y: Number(layout.y ?? 0),
-            scale: Number(layout.scale ?? 1)
-          }
-        };
-      })
+      actions: actionsForStage
     };
   });
 
@@ -1503,7 +1744,7 @@ function scriptToProjectState(script: any, requestId: string, projectId: string,
     return {
       id,
       sourceTaskId: id,
-      type: normalizeAssetKind(task.asset_type || task.assetType),
+      type: normalizeAssetKind(task.asset_type, task.assetType, id, task.name, task.character_id, task.characterId),
       name: id,
       status: 'pending',
       characterId: task.character_id || task.characterId,
@@ -1558,19 +1799,34 @@ function applyImageRecords(project: VNProjectState, records: any[]) {
 
   records.forEach((record) => {
     const sourceTask = sourceTaskForRecord(project.script, record);
-    const sourceId = sourceTask?.task_id
-      || sourceTask?.taskId
-      || record?.stableAsset?.source_task_id
-      || record?.sourceTaskId
-      || record?.assetResult?.task_id
-      || record?.assetResult?.asset_id;
+    const sourceId = pickText(
+      sourceTask?.task_id,
+      sourceTask?.taskId,
+      record?.stableAsset?.source_task_id,
+      record?.stableAsset?.task_id,
+      record?.stableAsset?.asset_id,
+      record?.sourceTaskId,
+      record?.source_task_id,
+      record?.assetResult?.source_task_id,
+      record?.assetResult?.task_id,
+      record?.assetResult?.asset_id
+    );
     if (!sourceId) return;
 
     const existing = assets.find(asset => asset.id === sourceId);
+    const existingManualOverride = isManualOverrideAsset(existing);
+    if (existingManualOverride) {
+      const existingTaskId = assetRemoteTaskId(existing);
+      const recordTaskId = imageRecordRemoteTaskId(record);
+      if (!recordTaskId || recordTaskId !== existingTaskId) {
+        return;
+      }
+    }
+
     if (record.type === 'IMAGE_ASSET_FAILED') {
       if (existing?.status !== 'failed' || existing.error !== record.error) {
         assets = upsertAsset(assets, {
-          ...(existing || { id: sourceId, name: sourceId, type: normalizeAssetKind(sourceTask?.asset_type) }),
+          ...(existing || { id: sourceId, name: sourceId, type: normalizeAssetKind(sourceTask?.asset_type, sourceTask?.assetType, sourceId, record?.sourceAssetKind) }),
           status: 'failed',
           error: record.error || 'Image generation failed'
         });
@@ -1580,12 +1836,31 @@ function applyImageRecords(project: VNProjectState, records: any[]) {
     }
 
     if (record.type !== 'IMAGE_ASSET_READY') return;
-    const url = toGeneratedImageUrl(record, sourceTask);
+    const nextUrl = toGeneratedImageUrl(record, sourceTask);
+    if (!nextUrl) return;
+    const providerAssetId = pickText(record?.stableAsset?.provider_asset_id, record?.assetResult?.asset_id, record?.assetResult?.assetId);
+    const cosKey = pickText(record?.stableAsset?.cos_key, record?.assetResult?.cos_key);
+    const existingProviderAssetId = pickText(existing?.metadata?.providerAssetId, existing?.metadata?.provider_asset_id);
+    const existingCosKey = pickText(existing?.metadata?.cosKey, existing?.metadata?.cos_key);
+    const keepExistingUrl = Boolean(
+      existing?.url
+      && existing.status === 'ready'
+      && ((providerAssetId && providerAssetId === existingProviderAssetId) || (cosKey && cosKey === existingCosKey))
+    );
+    const url = keepExistingUrl ? existing!.url! : nextUrl;
     const next: VNAsset = {
-      ...(existing || { id: sourceId, name: sourceId, type: normalizeAssetKind(sourceTask?.asset_type) }),
+      ...(existing || { id: sourceId, name: sourceId, type: normalizeAssetKind(sourceTask?.asset_type, sourceTask?.assetType, sourceId, record?.sourceAssetKind) }),
       id: sourceId,
       sourceTaskId: sourceId,
-      type: normalizeAssetKind(sourceTask?.asset_type || record?.stableAsset?.asset_type || record?.assetResult?.asset_type || record?.sourceAssetKind),
+      type: normalizeAssetKind(
+        sourceTask?.asset_type,
+        sourceTask?.assetType,
+        record?.stableAsset?.asset_type,
+        record?.assetResult?.asset_type,
+        record?.sourceAssetKind,
+        sourceId,
+        record?.stableAsset?.name
+      ),
       name: sourceId,
       status: 'ready',
       url,
@@ -1597,7 +1872,79 @@ function applyImageRecords(project: VNProjectState, records: any[]) {
         ...(existing?.metadata || {}),
         stableAssetId: record?.stableAsset?.asset_id,
         providerAssetId: record?.stableAsset?.provider_asset_id,
-        sourceTaskId: record?.stableAsset?.source_task_id || record?.sourceTaskId
+        cosKey,
+        sourceTaskId: record?.stableAsset?.source_task_id || record?.sourceTaskId,
+        submittedPayload: record?.submittedPayload,
+        sourceMessage: record?.sourceMessage,
+        assetResult: record?.assetResult
+      }
+    };
+
+    if (existing?.status !== next.status || existing?.url !== next.url || existing?.type !== next.type) {
+      assets = upsertAsset(assets, next);
+      changed = true;
+    }
+  });
+
+  if (!changed) return project;
+  return {
+    ...project,
+    assets,
+    generationStatus: generationStatusForAssets(project, assets)
+  };
+}
+
+function applyAudioRecords(project: VNProjectState, records: any[]) {
+  let assets = project.assets;
+  let changed = false;
+
+  records.forEach(record => {
+    const sourceTask = sourceVoiceTaskForRecord(project.script, record);
+    const sourceId = pickText(
+      sourceTask?.task_id,
+      sourceTask?.taskId,
+      record?.stableAsset?.source_task_id,
+      record?.sourceTaskId,
+      record?.source_task_id,
+      record?.sourceMessage?.task_id,
+      record?.sourceMessage?.taskId
+    );
+    if (!sourceId) return;
+
+    const existing = assets.find(asset => asset.id === sourceId);
+    if (record.type === 'AUDIO_ASSET_FAILED') {
+      if (existing?.status !== 'failed' || existing.error !== record.error) {
+        assets = upsertAsset(assets, {
+          ...(existing || { id: sourceId, name: sourceId, type: 'audio' as const }),
+          status: 'failed',
+          error: record.error || record.message || 'Voice generation failed'
+        });
+        changed = true;
+      }
+      return;
+    }
+
+    if (record.type !== 'AUDIO_ASSET_READY') return;
+    const url = toGeneratedAudioUrl(record, sourceTask);
+    const audioStats = record?.audioStats || record?.stableAsset?.metadata?.audioStats || {};
+    const durationSeconds = record?.stableAsset?.duration_seconds || audioStats.duration_seconds;
+    const sampleRate = record?.stableAsset?.sample_rate || audioStats.sample_rate;
+    const next: VNAsset = {
+      ...(existing || { id: sourceId, name: sourceId, type: 'audio' as const }),
+      id: sourceId,
+      sourceTaskId: sourceId,
+      type: 'audio',
+      name: pickText(record?.stableAsset?.name, record?.role, sourceTask?.role, sourceId),
+      status: 'ready',
+      url,
+      characterId: pickText(record?.stableAsset?.character_id, record?.character_id, sourceTask?.character_id, sourceTask?.characterId),
+      assetType: pickText(record?.stableAsset?.asset_type, 'character_voice'),
+      metadata: {
+        ...(existing?.metadata || {}),
+        stableAssetId: record?.stableAsset?.asset_id,
+        sourceTaskId: record?.stableAsset?.source_task_id || record?.sourceTaskId,
+        ...(durationSeconds ? { durationSeconds } : {}),
+        ...(sampleRate ? { sampleRate } : {})
       }
     };
 
@@ -1608,13 +1955,11 @@ function applyImageRecords(project: VNProjectState, records: any[]) {
   });
 
   if (!changed) return project;
-  const readyImages = assets.filter(asset => asset.type !== 'audio' && asset.status === 'ready').length;
-  const readyVoices = assets.filter(asset => asset.type === 'audio' && asset.status === 'ready').length;
-  return {
+  return ensureProjectAudioBindings({
     ...project,
     assets,
-    generationStatus: project.imageTaskCount && readyImages >= project.imageTaskCount && readyVoices >= (project.voiceTaskCount || 0) ? 'done' : project.generationStatus
-  };
+    generationStatus: generationStatusForAssets(project, assets)
+  });
 }
 
 function ensureProjectAudioBindings(project: VNProjectState) {
@@ -2210,6 +2555,27 @@ export function Workstation() {
 
   useEffect(() => {
     if (!project.requestId) return;
+    let timer: any;
+    const poll = async () => {
+       try {
+           const res = await fetch(`/api/v1/audio-tasks/${project.requestId}/results`, { cache: 'no-store' });
+           if (!res.ok) return;
+           const json = await res.json();
+           const records = json?.data?.records || json?.records || json?.results || [];
+           if (Array.isArray(records)) {
+              setProject(p => applyAudioRecords(p, records));
+           }
+       } catch (e) {
+           console.warn('audio result polling failed', e);
+       }
+    };
+    poll();
+    timer = setInterval(poll, 3000);
+    return () => clearInterval(timer);
+  }, [project.requestId]);
+
+  useEffect(() => {
+    if (!project.requestId) return;
 
     const checkAudioAsset = async (asset: VNAsset) => {
       if (!asset.url) return;
@@ -2223,12 +2589,10 @@ export function Workstation() {
                 status: 'ready' as const,
                 metadata: durationSeconds ? { ...(item.metadata || {}), durationSeconds } : item.metadata
               } : item);
-              const readyImages = assets.filter(item => item.type !== 'audio' && item.status === 'ready').length;
-              const readyVoices = assets.filter(item => item.type === 'audio' && item.status === 'ready').length;
               return {
                 ...p,
                 assets,
-                generationStatus: p.imageTaskCount && readyImages >= p.imageTaskCount && readyVoices >= (p.voiceTaskCount || 0) ? 'done' : p.generationStatus
+                generationStatus: generationStatusForAssets(p, assets)
               };
            });
         }
@@ -2473,7 +2837,8 @@ export function Workstation() {
   const activeNode = project.nodes.find(n => n.id === activeNodeId);
   const currentAction = activeNode?.actions[activeActionIdx];
   const activeChoiceBranches = choiceBranchesForScene(activeNode);
-  const assetById = (id?: string) => id ? project.assets.find(asset => asset.id === id) : undefined;
+  const normalizedProjectAssets = project.assets.map(normalizeWorkspaceAsset);
+  const assetById = (id?: string) => id ? normalizedProjectAssets.find(asset => asset.id === id) : undefined;
   const layoutSourceActions = activeNode?.actions.filter((action, index) => index !== activeActionIdx && action.layout) || [];
   const defaultLayoutSourceAction = activeNode?.actions[activeActionIdx - 1]
     || activeNode?.actions.find((_, index) => index !== activeActionIdx);
@@ -3466,12 +3831,12 @@ export function Workstation() {
   const activeActionBgAsset = assetById(currentAction?.bgAssetId);
   const activeBgAsset = activeActionBgAsset || activeSceneBgAsset;
   const activeCharAsset = assetById(currentAction?.charAssetId);
-  const activeBg = currentAction?.bgImage || activeActionBgAsset?.url || activeSceneBgAsset?.url;
-  const activeChar = currentAction?.charImage || activeCharAsset?.url || guideAsset?.image;
+  const activeBg = activeActionBgAsset?.url || currentAction?.bgImage || activeSceneBgAsset?.url;
+  const activeChar = activeCharAsset?.url || currentAction?.charImage || guideAsset?.image;
   const hasSceneBackground = Boolean(activeBg);
-  const audioAssets = project.assets.filter(asset => asset.type === 'audio');
-  const readyImageCount = project.assets.filter(asset => asset.type !== 'audio' && asset.status === 'ready').length;
-  const readyVoiceCount = project.assets.filter(asset => asset.type === 'audio' && asset.status === 'ready').length;
+  const audioAssets = normalizedProjectAssets.filter(asset => asset.type === 'audio');
+  const readyImageCount = normalizedProjectAssets.filter(asset => asset.type !== 'audio' && asset.status === 'ready').length;
+  const readyVoiceCount = normalizedProjectAssets.filter(asset => asset.type === 'audio' && asset.status === 'ready').length;
   const currentRuntimeScene = sceneById(activeNodeId);
   const variableDefinitions = project.variables || [];
   const projectValidationIssues = validateProject(project);
@@ -4055,12 +4420,13 @@ export function Workstation() {
   };
 
   const bindWorkspaceAsset = (asset: VNAsset) => {
+    const normalizedAsset = normalizeWorkspaceAsset(asset);
     setProject(p => ({
       ...p,
-      assets: upsertAsset(p.assets, asset)
+      assets: upsertAsset(p.assets, normalizedAsset)
     }));
-    bindAsset(asset);
-    setWorkspaceNotice(t('assetAssigned', { resource: resourceLabel(asset.type, locale) }));
+    bindAsset(normalizedAsset);
+    setWorkspaceNotice(t('assetAssigned', { resource: resourceLabel(normalizedAsset.type, locale) }));
     closeAssetPicker();
   };
 
@@ -4093,19 +4459,293 @@ export function Workstation() {
     return { label: t('pending'), className: 'border-yellow-300/30 text-yellow-100 bg-yellow-300/10' };
   };
 
+  const isNarrationSpeaker = (speaker?: string) => {
+    const value = String(speaker || '').trim().toLowerCase();
+    return !value || ['narrator', '旁白', '主角', 'protagonist'].includes(value);
+  };
+
+  const compactPromptText = (value: string, maxLength = 180) => value
+    .replace(/[“"][^”"]+[”"]/g, '')
+    .replace(/[「『].*?[」』]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+
+  const visualActionHintFrom = (texts: string[]) => {
+    const actionPattern = /(走|停|推|拉|弹|练|演奏|坐|站|靠|看|望|拿|抱|放|打开|关上|敲|进入|离开|转身|低头|抬头|伸手|靠近|跑|追|躲|哭|笑|琴|钢琴|乐谱|曲子|piano|play|playing|practice|practicing|push|open|walk|stop|hold|look|sit|stand)/i;
+    const actorPattern = /(他|她|主角|女生|少女|男生|女孩|少年|角色|character|she|he)/i;
+    const sentences = texts
+      .flatMap(text => compactPromptText(text, 320).split(/(?<=[。！？.!?；;])\s*/))
+      .map(text => text.trim())
+      .filter(Boolean);
+    const picked = sentences.filter(sentence => actionPattern.test(sentence) && actorPattern.test(sentence));
+    const fallback = sentences.filter(sentence => actionPattern.test(sentence));
+    return compactPromptText((picked.length ? picked : fallback).slice(0, 2).join(' '), 180);
+  };
+
+  const assetTaskFor = (assetId?: string) => {
+    const tasks = Array.isArray(project.script?.asset_tasks) ? project.script.asset_tasks : [];
+    return tasks.find((task: any) => pickText(task?.task_id, task?.taskId, task?.asset_id, task?.assetId) === assetId);
+  };
+
+  const sourceTaskForAsset = (asset?: VNAsset) => {
+    const tasks = Array.isArray(project.script?.asset_tasks) ? project.script.asset_tasks : [];
+    const ids = [
+      asset?.id,
+      asset?.sourceTaskId,
+      asset?.metadata?.sourceTaskId,
+      asset?.metadata?.source_task_id
+    ].map(item => pickText(item)).filter(Boolean);
+    return tasks.find((task: any) => ids.includes(pickText(task?.task_id, task?.taskId, task?.asset_id, task?.assetId)));
+  };
+
+  const payloadFromAssetHistory = (asset?: VNAsset) => {
+    const submittedPayload = readNestedPayload(asset, 'submittedPayload');
+    if (submittedPayload && typeof submittedPayload === 'object') return clonePlain(submittedPayload);
+    return undefined;
+  };
+
+  const backgroundWorkerPayload = (asset?: VNAsset) => {
+    const existing = payloadFromAssetHistory(asset);
+    if (existing) {
+      return {
+        ...existing,
+        project_id: pickText((existing as any).project_id, projectStorageId, project.projectId, project.id),
+        stage_prompt: pickText((existing as any).stage_prompt, (existing as any).stagePrompt, (existing as any).background_prompt, (existing as any).backgroundPrompt),
+        style_prompt: pickText((existing as any).style_prompt, (existing as any).stylePrompt, DEFAULT_BACKGROUND_STYLE_PROMPT),
+        negative_prompt: pickText((existing as any).negative_prompt, (existing as any).negativePrompt, 'people, character, silhouette, face, body, text, watermark'),
+        width: Number((existing as any).width || 1024),
+        height: Number((existing as any).height || 576)
+      };
+    }
+
+    const task = sourceTaskForAsset(asset) || assetTaskFor(currentAction?.bgAssetId || activeNode?.backgroundAssetId);
+    return {
+      project_id: projectStorageId || project.projectId || project.id || 'workspace_default',
+      stage_id: pickText(task?.stage_id, task?.stageId, task?.scene_id, activeNode?.id, currentAction?.id),
+      stage_prompt: pickText(task?.stage_prompt, task?.stagePrompt, task?.image_prompt, task?.imagePrompt, backgroundPromptHint(), activeNode?.title),
+      style_prompt: pickText(task?.style_prompt, task?.stylePrompt, DEFAULT_BACKGROUND_STYLE_PROMPT),
+      negative_prompt: pickText(task?.negative_prompt, task?.negativePrompt, 'people, character, silhouette, face, body, text, watermark'),
+      width: Number(task?.width || 1024),
+      height: Number(task?.height || 576)
+    };
+  };
+
+  const characterWorkerPayload = (asset?: VNAsset) => {
+    const existing = payloadFromAssetHistory(asset);
+    if (existing) {
+      return {
+        ...existing,
+        project_id: pickText((existing as any).project_id, projectStorageId, project.projectId, project.id),
+        character_id: pickText((existing as any).character_id, (existing as any).characterId, asset?.characterId, currentAction?.speaker, guideAsset?.id, 'character')
+      };
+    }
+
+    const task = sourceTaskForAsset(asset) || assetTaskFor(asset?.id || currentAction?.charAssetId);
+    const character = characterPromptParts(asset);
+    const assetType = pickText(asset?.assetType, task?.asset_type, task?.assetType);
+    const isVariant = assetType.toLowerCase().includes('variant');
+    const basePayload = {
+      project_id: projectStorageId || project.projectId || project.id || 'workspace_default',
+      character_id: pickText(asset?.characterId, task?.character_id, task?.characterId, character.name, currentAction?.speaker, guideAsset?.id, 'character'),
+      pose_prompt: pickText(task?.pose_prompt, task?.posePrompt, character.behavior, asset?.url ? 'preserve the selected sprite reference pose and body language' : 'standing centered'),
+      expression_prompt: pickText(task?.expression_prompt, task?.expressionPrompt, character.emotion, expressionFromAssetName(asset), asset?.url ? 'preserve selected sprite expression' : 'neutral expression'),
+      outfit_prompt: pickText(task?.outfit_prompt, task?.outfitPrompt),
+      style_prompt: pickText(task?.style_prompt, task?.stylePrompt, DEFAULT_CHARACTER_STYLE),
+      negative_prompt: pickText(task?.negative_prompt, task?.negativePrompt, CHARACTER_NEGATIVE_PROMPT),
+      width: Number(task?.width || 640),
+      height: Number(task?.height || 1024),
+      sprite_framing: pickText(task?.sprite_framing, task?.spriteFraming, 'full_body')
+    };
+    if (isVariant) {
+      return {
+        ...basePayload,
+        variant_tags: task?.variant_tags || task?.variantTags || [basePayload.expression_prompt].filter(Boolean),
+        reference_asset_id: task?.reference_asset_id || task?.referenceAssetId,
+        reference_image_url: task?.reference_image_url || task?.referenceImageUrl
+      };
+    }
+    return {
+      ...basePayload,
+      character_card: task?.character_card || task?.characterCard || {
+        name: basePayload.character_id,
+        role: 'visual novel character',
+        appearance: character.basic,
+        outfit: basePayload.outfit_prompt,
+        style: DEFAULT_CHARACTER_STYLE,
+        identity_rules: ['single character only', 'same face shape', 'same hairstyle and eye color']
+      },
+      appearance_prompt: pickText(task?.appearance_prompt, task?.appearancePrompt, character.basic)
+    };
+  };
+
+  const voiceWorkerPayload = (asset?: VNAsset) => {
+    const existing = payloadFromAssetHistory(asset);
+    if (existing) return clonePlain(existing);
+    const lineText = actionText(currentAction);
+    return {
+      project_id: projectStorageId || project.projectId || project.id || 'workspace_default',
+      action_id: currentAction?.id,
+      character_id: currentAction?.speaker || guideAsset?.id || 'narrator',
+      role: currentAction?.speaker || guideAsset?.name || 'Narrator',
+      text: lineText,
+      voice_desc: [
+        currentAction?.speaker ? `Speaker: ${currentAction.speaker}` : '',
+        lineText ? `Line: ${lineText}` : '',
+        currentAction?.emotion ? `Emotion: ${currentAction.emotion}` : '',
+        'Create a voice direction. Focus on tone, pacing, emotion, and delivery.'
+      ].filter(Boolean).join('\n'),
+      voice_prompt: [
+        currentAction?.speaker ? `Speaker: ${currentAction.speaker}` : '',
+        lineText ? `Line: ${lineText}` : '',
+        currentAction?.emotion ? `Emotion: ${currentAction.emotion}` : '',
+        'Create a voice direction. Focus on tone, pacing, emotion, and delivery.'
+      ].filter(Boolean).join('\n'),
+      source_asset_id: asset?.id
+    };
+  };
+
+  const workerPayloadForKind = (kind: PickerKind, regenerate = false) => {
+    const asset = resourceForKind(kind);
+    const payload = kind === 'bg'
+      ? backgroundWorkerPayload(asset)
+      : kind === 'char'
+        ? characterWorkerPayload(asset)
+        : voiceWorkerPayload(asset);
+    const next = clonePlain(payload) as Record<string, unknown>;
+    if (regenerate) {
+      next.seed = randomSeed();
+    }
+    return next;
+  };
+
+  const endpointForPayload = (kind: PickerKind, payload: Record<string, unknown>, asset?: VNAsset) => {
+    if (kind === 'bg') return '/api/v1/asset-api/background';
+    if (kind === 'audio') return '/api/v1/asset-api/voice';
+    const type = pickText(asset?.assetType, payload.asset_type, payload.assetType).toLowerCase();
+    if (type.includes('variant') || Boolean(pickText(payload.reference_image_url, payload.referenceImageUrl))) {
+      return '/api/v1/asset-api/character/variant';
+    }
+    return '/api/v1/asset-api/character';
+  };
+
+  const assertImageAssetApiReady = async () => {
+    const res = await fetch('/api/v1/asset-api/health', { cache: 'no-store' });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.code === -1) {
+      throw new Error(json.message || json.error || 'Asset image API health check failed');
+    }
+    const health = apiData(json);
+    const status = pickText(health?.status).toLowerCase();
+    const comfyAvailable = health?.comfyui?.available;
+    if (status && !['ok', 'up', 'healthy'].includes(status)) {
+      throw new Error(`Asset image API is ${status}. Check ComfyUI on server A before generating.`);
+    }
+    if (comfyAvailable === false) {
+      throw new Error('Asset image API is degraded: ComfyUI is unavailable on server A.');
+    }
+  };
+
+  const assetText = (asset?: VNAsset) => [
+    asset?.id,
+    asset?.name,
+    asset?.sourceTaskId,
+    asset?.assetType,
+    asset?.characterId
+  ].filter(Boolean).join(' ').replace(/[-_]+/g, ' ').toLowerCase();
+
+  const expressionFromAssetName = (asset?: VNAsset) => {
+    const text = assetText(asset);
+    if (text.includes('weak') && text.includes('smile')) return 'weak smile';
+    if (text.includes('sad')) return 'sad';
+    if (text.includes('surpris')) return 'surprised';
+    if (text.includes('smile')) return 'smile';
+    if (text.includes('neutral')) return 'neutral';
+    if (text.includes('angry')) return 'angry';
+    if (text.includes('shy')) return 'shy';
+    return '';
+  };
+
+  const selectedSpritePromptFields = (asset?: VNAsset) => {
+    const metadata = (asset?.metadata || {}) as any;
+    const userRecord = metadata.user_asset_record || {};
+    const userMetadata = userRecord.metadata || {};
+    const submittedPayload = metadata.submittedPayload || userMetadata.submittedPayload || {};
+    const assetResult = metadata.assetResult || userMetadata.assetResult || {};
+    return {
+      appearance: pickText(
+        metadata.appearance_prompt,
+        submittedPayload.appearance_prompt,
+        submittedPayload.appearancePrompt,
+        userRecord.description,
+        assetResult.appearance_prompt
+      ),
+      pose: pickText(
+        metadata.pose_prompt,
+        submittedPayload.pose_prompt,
+        submittedPayload.posePrompt,
+        assetResult.pose_prompt
+      ),
+      expression: pickText(
+        metadata.expression_prompt,
+        submittedPayload.expression_prompt,
+        submittedPayload.expressionPrompt,
+        assetResult.expression_prompt
+      ),
+      outfit: pickText(
+        metadata.outfit_prompt,
+        submittedPayload.outfit_prompt,
+        submittedPayload.outfitPrompt,
+        assetResult.outfit_prompt
+      ),
+      prompt: pickText(metadata.prompt, userMetadata.prompt)
+    };
+  };
+
+  const characterPromptParts = (sourceAsset: VNAsset | undefined = activeCharAsset) => {
+    const task = assetTaskFor(sourceAsset?.id || currentAction?.charAssetId);
+    const fields = selectedSpritePromptFields(sourceAsset);
+    const characterId = pickText(sourceAsset?.characterId, task?.character_id, task?.characterId, currentAction?.speaker, guideAsset?.id);
+    const characters = Array.isArray(project.script?.characters) ? project.script.characters : [];
+    const profile = characters.find((character: any) => {
+      const keys = [
+        character?.character_id,
+        character?.characterId,
+        character?.id,
+        character?.name,
+        character?.speaker
+      ].map(item => pickText(item)).filter(Boolean);
+      return keys.includes(characterId) || keys.some(key => assetText(sourceAsset).includes(key.toLowerCase().replace(/[-_]+/g, ' ')));
+    }) || {};
+    const card = (profile as any)?.character_card || (profile as any)?.characterCard || {};
+    const behavior = pickText(
+      fields.pose,
+      task?.pose_prompt,
+      task?.posePrompt,
+      sourceAsset?.url ? 'preserve the selected sprite reference pose and body language' : ''
+    );
+    const basic = compactPromptText([
+      pickText((profile as any)?.name, characterId),
+      pickText((profile as any)?.role, card.role),
+      pickText(fields.appearance, card.appearance, (profile as any)?.appearance, task?.appearance_prompt, task?.appearancePrompt, fields.prompt),
+      pickText(fields.outfit, card.outfit, task?.outfit_prompt, task?.outfitPrompt)
+    ].filter(Boolean).join('; '), 220);
+
+    return {
+      name: pickText((profile as any)?.name, characterId, sourceAsset?.name, currentAction?.speaker, 'character'),
+      basic,
+      emotion: pickText(fields.expression, task?.expression_prompt, task?.expressionPrompt, expressionFromAssetName(sourceAsset)),
+      behavior
+    };
+  };
+
+  const backgroundPromptHint = () => visualActionHintFrom([
+    activeNode?.summary || '',
+    isNarrationSpeaker(currentAction?.speaker) ? actionText(currentAction) : ''
+  ].filter(Boolean)) || compactPromptText(activeNode?.summary || activeNode?.title || '', 180);
+
   const buildResourcePrompt = (kind: PickerKind) => {
-    const parts = [
-      activeNode?.title ? `Scene: ${activeNode.title}` : '',
-      activeNode?.summary ? `Summary: ${activeNode.summary}` : '',
-      currentAction?.speaker ? `Speaker: ${currentAction.speaker}` : '',
-      actionText(currentAction) ? `Line: ${actionText(currentAction)}` : '',
-      kind === 'bg'
-        ? 'Create a visual novel background for this scene. Avoid characters unless the line explicitly asks for a CG.'
-        : kind === 'char'
-          ? 'Create a reusable visual novel character sprite variant. Focus on expression, pose, emotion, lighting, and camera.'
-          : 'Create a voice direction. Focus on tone, pacing, emotion, and delivery.'
-    ];
-    return parts.filter(Boolean).join('\n');
+    return formatWorkerPayload(workerPayloadForKind(kind));
   };
 
   const openResourcePrompt = (kind: PickerKind, regenerate = false) => {
@@ -4113,54 +4753,76 @@ export function Workstation() {
       open: true,
       kind,
       regenerate,
-      prompt: buildResourcePrompt(kind)
+      prompt: formatWorkerPayload(workerPayloadForKind(kind, regenerate))
     });
+  };
+
+  const pollRemoteAssetTask = async (taskId: string) => {
+    const startedAt = Date.now();
+    let lastProgressAt = startedAt;
+    let lastFingerprint = '';
+
+    while (Date.now() - startedAt < REMOTE_ASSET_TASK_TIMEOUT_MS) {
+      const res = await fetch(`/api/v1/asset-api/tasks/${encodeURIComponent(taskId)}`, { cache: 'no-store' });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.code === -1) {
+        throw new Error(json.message || json.error || 'Remote task polling failed');
+      }
+      const payload = apiData(json);
+      const status = pickText(payload?.status, payload?.data?.status).toLowerCase();
+      const fingerprint = remoteTaskFingerprint(payload);
+      if (fingerprint && fingerprint !== lastFingerprint) {
+        lastFingerprint = fingerprint;
+        lastProgressAt = Date.now();
+      }
+      if (['failed', 'error', 'errored', 'cancelled', 'canceled'].includes(status)) {
+        throw new Error(payload.message || payload.error || payload.error_code || 'Remote task failed');
+      }
+      if (['succeeded', 'success', 'ready', 'completed', 'done'].includes(status)) {
+        return payload;
+      }
+      if (Date.now() - lastProgressAt > REMOTE_ASSET_TASK_STALE_MS) {
+        throw new Error(`Remote task ${taskId} is stalled (${status || 'unknown'}). Check asset API health and retry.`);
+      }
+      await sleep(REMOTE_ASSET_TASK_POLL_MS);
+    }
+    throw new Error('Remote task timed out');
+  };
+
+  const failWorkspaceAsset = (assetId: string, message: string) => {
+    setProject(p => ({
+      ...p,
+      assets: p.assets.map(asset => asset.id === assetId ? {
+        ...asset,
+        status: 'failed' as const,
+        error: message,
+        metadata: { ...(asset.metadata || {}), error: message }
+      } : asset)
+    }));
   };
 
   const requestGenerateResource = async (kind: PickerKind, regenerate = false, promptOverride?: string) => {
     if (!currentAction) return;
-    const lineText = actionText(currentAction);
-    const resourcePrompt = promptOverride?.trim() || buildResourcePrompt(kind) || lineText || activeNode?.title || project.title || 'visual novel resource';
-    const projectId = projectStorageId || 'workspace_default';
     const sourceAsset = resourceForKind(kind);
-
-    const endpoint = kind === 'bg'
-      ? '/api/v1/asset-api/background'
-      : kind === 'char'
-        ? '/api/v1/asset-api/character/variant'
-        : '/api/v1/asset-api/voice';
-
-    const body = kind === 'bg'
-      ? {
-          project_id: projectId,
-          source_action_id: currentAction.id,
-          stage_id: activeNode?.id,
-          scene_title: activeNode?.title,
-          background_prompt: resourcePrompt,
-          regenerate,
-          source_asset_id: sourceAsset?.id
-        }
-      : kind === 'char'
-        ? {
-            project_id: projectId,
-            character_id: currentAction.speaker || guideAsset?.id || 'character',
-            source_asset_id: sourceAsset?.id,
-            reference_image_url: sourceAsset?.url || currentAction.charImage,
-            expression_prompt: resourcePrompt,
-            pose_prompt: 'visual novel standing sprite, centered',
-            cutout_mode: 'preserve_alpha',
-            variant_tags: [currentAction.speaker].filter(Boolean),
-            regenerate
-          }
-        : {
-            project_id: projectId,
-            action_id: currentAction.id,
-            character_id: currentAction.speaker || guideAsset?.id || 'narrator',
-            text: lineText,
-            voice_prompt: resourcePrompt,
-            source_asset_id: sourceAsset?.id,
-            regenerate
-          };
+    let body: Record<string, unknown>;
+    try {
+      body = promptOverride?.trim()
+        ? JSON.parse(promptOverride)
+        : workerPayloadForKind(kind, regenerate);
+      if (!body || Array.isArray(body) || typeof body !== 'object') {
+        throw new Error('Prompt payload must be a JSON object');
+      }
+    } catch (error) {
+      setWorkspaceNotice(error instanceof Error ? error.message : 'Prompt payload must be valid JSON');
+      return;
+    }
+    if (regenerate && body.seed === undefined) {
+      body.seed = randomSeed();
+    }
+    const endpoint = endpointForPayload(kind, body, sourceAsset);
+    const resourcePrompt = formatWorkerPayload(body);
+    const characterId = pickText(body.character_id, body.characterId, sourceAsset?.characterId, currentAction.speaker, guideAsset?.id, 'character');
+    let pendingAssetId = '';
 
     setWorkspaceNotice(t('generatingResource', {
       action: regenerate ? t('regenerate') : t('generate'),
@@ -4168,6 +4830,9 @@ export function Workstation() {
     }));
 
     try {
+      if (kind !== 'audio') {
+        await assertImageAssetApiReady();
+      }
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4179,34 +4844,80 @@ export function Workstation() {
       }
 
       const payload = json.data || json;
-      const resultUrl = payload.absolute_url || payload.url || payload.audio_url;
-      const resultId = payload.asset_id || payload.task_id || `${kind}_${Date.now()}`;
+      const taskId = extractRemoteTaskId(payload);
+      const result = extractRemoteResult(payload) || {};
+      const resultUrl = remoteResultUrl(result);
+      const resultId = (regenerate && sourceAsset?.id) || result.asset_id || taskId || `${kind}_${Date.now()}`;
+      pendingAssetId = resultId;
       const nextAsset: VNAsset = {
         id: resultId,
-        sourceTaskId: payload.task_id || resultId,
+        sourceTaskId: taskId || result.task_id || resultId,
         type: kind,
-        name: payload.name || `${resourceLabel(kind, locale)} ${resultId}`,
+        name: result.name || `${resourceLabel(kind, locale)} ${resultId}`,
         status: resultUrl ? 'ready' : 'pending',
         url: resultUrl,
-        characterId: payload.character_id || currentAction.speaker,
-        assetType: payload.asset_type,
-        width: payload.width,
-        height: payload.height,
-        metadata: payload.metadata
+        characterId: result.character_id || characterId,
+        assetType: result.asset_type || (kind === 'audio' ? 'character_voice' : kind === 'char' ? (endpoint.includes('/variant') ? 'character_variant' : 'character_sprite') : 'background'),
+        width: result.width,
+        height: result.height,
+        metadata: {
+          ...(result.metadata || {}),
+          prompt: resourcePrompt,
+          submittedPayload: body,
+          taskId,
+          remoteTaskId: taskId,
+          providerAssetId: result.asset_id,
+          regenerate,
+          manualOverride: true,
+          generationSource: 'manual',
+          manualUpdatedAt: new Date().toISOString()
+        }
       };
 
       bindWorkspaceAsset(nextAsset);
-      setWorkspaceNotice(payload.task_id
-        ? t('resourceTaskSubmitted', { resource: resourceLabel(kind, locale), taskId: payload.task_id })
+      if (taskId && !resultUrl) {
+        const finalPayload = await pollRemoteAssetTask(taskId);
+        const finalResult = extractRemoteResult(finalPayload) || {};
+        const finalUrl = remoteResultUrl(finalResult);
+        if (!finalUrl) {
+          throw new Error('Remote task succeeded without a playable asset URL');
+        }
+        bindWorkspaceAsset({
+          ...nextAsset,
+          sourceTaskId: taskId,
+          status: 'ready',
+          url: finalUrl,
+          width: finalResult.width,
+          height: finalResult.height,
+          assetType: finalResult.asset_type || nextAsset.assetType,
+          metadata: {
+            ...(nextAsset.metadata || {}),
+            ...(finalResult.metadata || {}),
+            providerAssetId: finalResult.asset_id,
+            taskId,
+            remoteTaskId: taskId,
+            submittedPayload: body,
+            assetResult: finalResult,
+            durationSeconds: finalResult.duration_seconds,
+            sampleRate: finalResult.sample_rate,
+            manualOverride: true,
+            generationSource: 'manual',
+            manualUpdatedAt: new Date().toISOString()
+          }
+        });
+      }
+      setWorkspaceNotice(taskId
+        ? t('resourceTaskSubmitted', { resource: resourceLabel(kind, locale), taskId })
         : t('resourceUpdated', { resource: resourceLabel(kind, locale) }));
     } catch (error) {
       const message = error instanceof Error ? error.message : t('resourceGenerationFailed', { resource: resourceLabel(kind, locale) });
+      if (pendingAssetId) failWorkspaceAsset(pendingAssetId, message);
       setWorkspaceNotice(message);
     }
   };
 
   const pickerQuery = assetPicker.query.trim().toLowerCase();
-  const pickerWorkspaceAssets = project.assets
+  const pickerWorkspaceAssets = normalizedProjectAssets
     .filter(asset => asset.type === assetPicker.kind)
     .filter(asset => !pickerQuery || assetSearchText(asset).includes(pickerQuery));
   const projectAssetIds = new Set(project.assets.map(asset => asset.id));
@@ -6944,7 +7655,7 @@ export function Workstation() {
               </div>
               <div className="space-y-4 p-4">
                 <textarea
-                  className="min-h-56 w-full resize-none rounded-lg border border-white/10 bg-black p-3 text-sm leading-relaxed text-white/80 outline-none placeholder:text-white/25 focus:border-primary"
+                  className="min-h-72 w-full resize-none rounded-lg border border-white/10 bg-black p-3 font-mono text-xs leading-relaxed text-white/80 outline-none placeholder:text-white/25 focus:border-primary"
                   value={resourcePromptDraft.prompt}
                   onChange={event => setResourcePromptDraft(draft => draft ? { ...draft, prompt: event.target.value } : draft)}
                   placeholder={t('regeneratePromptPlaceholder')}
