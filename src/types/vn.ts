@@ -4,6 +4,7 @@ export type VNVariableType = 'boolean' | 'number' | 'string';
 export type VNVariableScope = 'global' | 'character' | 'scene';
 export type VNConditionOperator = 'equals' | 'not_equals' | 'greater_than' | 'greater_or_equal' | 'less_than' | 'less_or_equal' | 'exists' | 'not_exists';
 export type VNEffectType = 'set_flag' | 'unset_flag' | 'set_var' | 'add_var' | 'add_affinity' | 'mark_visited';
+export type VNChoiceJumpMode = 'linear' | 'direct' | 'conditional';
 export type VNTimelineMode = 'script' | 'timeline';
 export type VNActionType = 'line' | 'choice' | 'jump' | 'set_var' | 'show_character' | 'hide_character' | 'change_background' | 'play_bgm' | 'stop_bgm' | 'play_sfx' | 'show_cg' | 'transition' | 'ending';
 export type VNTimelineTrack = 'script' | 'background' | 'character' | 'voice' | 'bgm' | 'sfx' | 'fx';
@@ -39,6 +40,8 @@ export interface VNChoice {
   nextId?: string;
   targetActionId?: string;
   targetSceneId?: string;
+  jumpMode?: VNChoiceJumpMode;
+  jumpConditions?: VNCondition[];
   conditions?: VNCondition[];
   effects?: VNEffect[];
   disabledText?: string;
@@ -52,6 +55,9 @@ export interface VNSceneLink {
   toSceneId: string;
   toActionId?: string;
   conditions?: VNCondition[];
+  displayConditions?: VNCondition[];
+  jumpConditions?: VNCondition[];
+  jumpMode?: VNChoiceJumpMode;
   label?: string;
 }
 
@@ -109,6 +115,7 @@ export interface VNAction {
   text?: string;
   emotion?: string;
   choices?: VNChoice[];
+  effects?: VNEffect[];
   targetSceneId?: string;
   targetActionId?: string;
   bgAssetId?: string;

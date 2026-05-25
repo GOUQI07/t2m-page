@@ -10,7 +10,7 @@ test.describe('market review workflow', () => {
     const title = `E2E Market ${projectId}`;
     const playableUrl = process.env.E2E_PLAYABLE_URL || 'http://127.0.0.1:3000/';
 
-    const saveProject = await authedPost(request, auth.token, `/api/v1/projects/${projectId}`, {
+    const saveProject = await authedPost(request, auth.token, '/api/v1/projects', {
       projectId,
       id: projectId,
       title,

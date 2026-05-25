@@ -24,6 +24,7 @@ import {
   VNAction,
   VNAsset,
   VNChoice,
+  VNChoiceJumpMode,
   VNSceneLink,
   VNSceneType,
   VNActionType,
@@ -169,8 +170,8 @@ const MAX_ESTIMATED_ACTION_DURATION = 8;
 const TIMELINE_PX_PER_SECOND = 72;
 const TIMELINE_HEADER_WIDTH = 128;
 const PROJECT_HISTORY_LIMIT = 100;
-const SCENE_GRAPH_CARD_WIDTH = 164;
-const SCENE_GRAPH_CARD_HEIGHT = 92;
+const SCENE_GRAPH_CARD_WIDTH = 190;
+const SCENE_GRAPH_CARD_HEIGHT = 150;
 const SCENE_GRAPH_COLUMN_GAP = 92;
 const SCENE_GRAPH_ROW_GAP = 34;
 const SCENE_MAP_MIN_ZOOM = 0.55;
@@ -369,6 +370,19 @@ function normalizeConditionOperator(value: unknown): VNConditionOperator {
     : 'equals';
 }
 
+function normalizeChoiceJumpMode(value: unknown, fallback: VNChoiceJumpMode = 'linear'): VNChoiceJumpMode {
+  const mode = pickText(value).toLowerCase() as VNChoiceJumpMode;
+  return ['linear', 'direct', 'conditional'].includes(mode) ? mode : fallback;
+}
+
+function choiceJumpMode(choice?: VNChoice): VNChoiceJumpMode {
+  if (!choice) return 'linear';
+  return normalizeChoiceJumpMode(
+    choice.jumpMode,
+    choice.jumpConditions?.length ? 'conditional' : (choice.targetSceneId || choice.targetActionId || choice.nextId) ? 'direct' : 'linear'
+  );
+}
+
 function normalizeEffectType(value: unknown): VNEffectType {
   const type = pickText(value) as VNEffectType;
   return ['set_flag', 'unset_flag', 'set_var', 'add_var', 'add_affinity', 'mark_visited'].includes(type)
@@ -440,6 +454,16 @@ function normalizeChoice(choice: any, choiceIndex: number, actionToScene?: Map<s
     nextId: pickText(choice?.nextId, choice?.next_id) || undefined,
     targetActionId,
     targetSceneId: targetSceneId || undefined,
+    jumpMode: normalizeChoiceJumpMode(
+      choice?.jumpMode || choice?.jump_mode,
+      Array.isArray(choice?.jumpConditions) || Array.isArray(choice?.jump_conditions)
+        ? 'conditional'
+        : targetSceneId || targetActionId
+          ? 'direct'
+          : 'linear'
+    ),
+    jumpConditions: (Array.isArray(choice?.jumpConditions) ? choice.jumpConditions : Array.isArray(choice?.jump_conditions) ? choice.jump_conditions : [])
+      .map((condition: any, index: number) => normalizeCondition(condition, index)),
     conditions: Array.isArray(choice?.conditions) ? choice.conditions.map((condition: any, index: number) => normalizeCondition(condition, index)) : undefined,
     effects: Array.isArray(choice?.effects) ? choice.effects.map((effect: any, index: number) => normalizeEffect(effect, index)) : undefined,
     disabledText: pickText(choice?.disabledText, choice?.disabled_text) || undefined
@@ -466,6 +490,7 @@ function normalizeAction(action: any, sceneIndex: number, actionIndex: number, a
     text: pickText(action?.text, action?.dialogue, action?.line),
     emotion: pickText(action?.emotion) || undefined,
     choices: rawChoices.map((choice: any, index: number) => normalizeChoice(choice, index, actionToScene)),
+    effects: Array.isArray(action?.effects) ? action.effects.map((effect: any, index: number) => normalizeEffect(effect, index)) : undefined,
     targetSceneId: pickText(action?.targetSceneId, action?.target_scene_id) || undefined,
     targetActionId: pickText(action?.targetActionId, action?.target_action_id) || undefined,
     bgAssetId: pickText(action?.bgAssetId, action?.background_asset_task_id, action?.background_asset_id) || undefined,
@@ -582,7 +607,9 @@ function deriveSceneLinks(nodes: VNNode[]): VNSceneLink[] {
       }
 
       action.choices?.forEach(choice => {
-        if (!choice.targetSceneId || !sceneIds.has(choice.targetSceneId)) return;
+        const mode = choiceJumpMode(choice);
+        if (mode === 'linear' || !choice.targetSceneId || !sceneIds.has(choice.targetSceneId)) return;
+        const jumpConditions = mode === 'conditional' ? (choice.jumpConditions || []) : [];
         links.push({
           id: `choice_${node.id}_${action.id}_${choice.id}_${choice.targetSceneId}`,
           fromSceneId: node.id,
@@ -590,7 +617,10 @@ function deriveSceneLinks(nodes: VNNode[]): VNSceneLink[] {
           fromChoiceId: choice.id,
           toSceneId: choice.targetSceneId,
           toActionId: choice.targetActionId,
-          conditions: choice.conditions,
+          conditions: jumpConditions.length ? jumpConditions : choice.conditions,
+          displayConditions: choice.conditions,
+          jumpConditions,
+          jumpMode: mode,
           label: choice.label || 'Choice'
         });
       });
@@ -608,6 +638,7 @@ function sceneGraphLinkKind(link: VNSceneLink): SceneGraphLinkKind {
 
 function sceneGraphLinkClass(link: VNSceneLink) {
   const kind = sceneGraphLinkKind(link);
+  if (link.jumpMode === 'conditional' || link.jumpConditions?.length) return 'stroke-violet-300';
   if (kind === 'choice') return 'stroke-primary';
   if (kind === 'jump') return 'stroke-sky-300';
   return 'stroke-white/35';
@@ -846,10 +877,15 @@ let sceneId = project.entrySceneId || project.nodes?.[0]?.id || "";
 let actionIndex = 0;
 const vars = {};
 const visited = new Set();
+let appliedActionEffectKey = "";
 const assetById = new Map((project.assets || []).map(asset => [asset.id, asset]));
 const app = document.getElementById("app");
 const saveKey = "ariadne_saves_" + (project.projectId || project.id || "default");
 let savePanelOpen = false;
+(project.variables || []).forEach(variable => {
+  const key = variable.key || variable.variableKey || variable.variable_key;
+  if (key) vars[key] = variable.defaultValue ?? variable.default_value ?? (variable.type === "number" ? 0 : variable.type === "string" ? "" : false);
+});
 
 function scene() { return (project.nodes || []).find(item => item.id === sceneId) || project.nodes?.[0]; }
 function action() { return scene()?.actions?.[actionIndex]; }
@@ -886,6 +922,20 @@ function applyEffects(effects = [], fallbackSceneId) {
     else if (effect.type === "add_var" || effect.type === "add_affinity") vars[key] = Number(vars[key] || 0) + Number(effect.amount || 0);
     else if (effect.type === "mark_visited") visited.add(effect.sceneId || fallbackSceneId);
   });
+}
+function choiceJumpMode(choice) {
+  if (choice?.jumpMode === "linear" || choice?.jumpMode === "direct" || choice?.jumpMode === "conditional") return choice.jumpMode;
+  if ((choice?.jumpConditions || []).length) return "conditional";
+  return choice?.targetSceneId || choice?.targetActionId || choice?.nextId ? "direct" : "linear";
+}
+function applyCurrentActionEffects() {
+  const currentScene = scene();
+  const current = action();
+  if (!currentScene || !current) return;
+  const key = currentScene.id + ":" + actionIndex + ":" + current.id;
+  if (appliedActionEffectKey === key) return;
+  appliedActionEffectKey = key;
+  applyEffects(current.effects || [], currentScene.id);
 }
 function loadSaves() {
   try {
@@ -928,6 +978,7 @@ function restoreSave(slotId) {
   (slot.state.visitedSceneIds || [targetScene.id]).forEach(id => visited.add(id));
   sceneId = targetScene.id;
   actionIndex = Math.min(Math.max(0, slot.state.currentActionIndex || 0), Math.max(0, (targetScene.actions || []).length - 1));
+  appliedActionEffectKey = targetScene.id + ":" + actionIndex + ":" + ((targetScene.actions || [])[actionIndex]?.id || "");
   savePanelOpen = false;
   render();
 }
@@ -942,19 +993,28 @@ function jumpTo(targetSceneId, targetActionId) {
   actionIndex = targetActionId ? Math.max(0, nextScene.actions.findIndex(item => item.id === targetActionId)) : 0;
   render();
 }
+function advanceLinear() {
+  const currentScene = scene();
+  if (!currentScene) return;
+  if (actionIndex < (currentScene.actions?.length || 0) - 1) actionIndex += 1;
+  else if (currentScene.defaultNextSceneId) return jumpTo(currentScene.defaultNextSceneId);
+  render();
+}
 function advance() {
   const currentScene = scene();
   const current = action();
   if (!current || current.choices?.length) return;
   if (current.type === "jump" && current.targetSceneId) return jumpTo(current.targetSceneId, current.targetActionId);
-  if (actionIndex < (currentScene.actions?.length || 0) - 1) actionIndex += 1;
-  else if (currentScene.defaultNextSceneId) return jumpTo(currentScene.defaultNextSceneId);
-  render();
+  advanceLinear();
 }
 function choose(choice) {
   if (!choice) return;
+  if (!(choice.conditions || []).every(conditionOk)) return;
+  const mode = choiceJumpMode(choice);
+  const jumpAllowed = mode !== "conditional" || (choice.jumpConditions || []).every(conditionOk);
   applyEffects(choice.effects || [], choice.targetSceneId || sceneId);
-  if (choice.targetSceneId) jumpTo(choice.targetSceneId, choice.targetActionId);
+  if (mode !== "linear" && jumpAllowed && choice.targetSceneId) jumpTo(choice.targetSceneId, choice.targetActionId);
+  else advanceLinear();
 }
 function render() {
   const currentScene = scene();
@@ -964,9 +1024,10 @@ function render() {
     return;
   }
   visited.add(currentScene.id);
+  applyCurrentActionEffects();
   const bg = current.bgImage || assetUrl(current.bgAssetId) || assetUrl(currentScene.backgroundAssetId) || "";
   const sprite = current.charImage || assetUrl(current.charAssetId) || "";
-  const choices = (current.choices || []).filter(choice => (choice.conditions || []).every(conditionOk));
+  const choices = current.choices || [];
   const slots = loadSaves();
   const savePanel = savePanelOpen ? '<div class="save-panel"><section class="save-dialog" onclick="event.stopPropagation()"><header><div><strong>Save / Load</strong><p>' + html(project.title || "Visual Novel") + '</p></div><button data-close-saves>Close</button></header><div class="save-list">' + (slots.length ? slots.map(slot => '<article class="save-card"><strong>' + html(slot.name || "Save") + '</strong><p>' + html(new Date(slot.updatedAt || Date.now()).toLocaleString()) + '</p><footer><button data-load-save="' + html(slot.slotId) + '">Load</button><button data-delete-save="' + html(slot.slotId) + '">Delete</button></footer></article>').join("") : '<div class="save-card"><p>No saves yet.</p></div>') + '</div></section></div>' : "";
   app.innerHTML = \`
@@ -987,7 +1048,13 @@ function render() {
     <section class="hud" onclick="if(!event.target.closest('button')) advance()">
       <div class="meta"><span class="speaker">\${html(current.speaker || "Narrator")}</span><span>\${actionIndex + 1} / \${currentScene.actions.length}</span></div>
       <div class="text">\${html(textOf(current))}</div>
-      <div class="choices">\${choices.map(choice => \`<button data-choice="\${html(choice.id)}">\${html(choice.label)}</button>\`).join("")}</div>
+      <div class="choices">\${choices.map(choice => {
+        const enabled = (choice.conditions || []).every(conditionOk);
+        const mode = choiceJumpMode(choice);
+        const jumpAllowed = mode !== "conditional" || (choice.jumpConditions || []).every(conditionOk);
+        const hint = !enabled ? (choice.disabledText || "Condition locked") : mode === "linear" || !jumpAllowed ? "Linear continue" : (project.nodes || []).find(item => item.id === choice.targetSceneId)?.title || "Jump";
+        return \`<button data-choice="\${html(choice.id)}" \${enabled ? "" : "disabled"}>\${html(enabled ? choice.label : (choice.disabledText || choice.label))}<span>\${html(hint)}</span></button>\`;
+      }).join("")}</div>
     </section>\`;
   app.querySelectorAll("[data-choice]").forEach(button => {
     button.addEventListener("click", event => {
@@ -1097,11 +1164,18 @@ function validateProject(project: VNProjectState): ProjectValidationIssue[] {
       if (action.audioAssetId && !assetIds.has(action.audioAssetId)) {
         issues.push({ id: `missing_audio_asset_${node.id}_${action.id}`, severity: 'warning', message: `${action.id} references missing audio asset: ${action.audioAssetId}`, sceneId: node.id, actionId: action.id });
       }
+      (action.effects || []).forEach(effect => {
+        const key = effectVariableKey(effect, node.id);
+        if (key && !variableKeys.has(key)) {
+          issues.push({ id: `missing_action_effect_var_${node.id}_${action.id}_${effect.id}`, severity: 'warning', message: `${action.id} effect writes undefined variable "${key}"`, sceneId: node.id, actionId: action.id });
+        }
+      });
       if ((action.choices || []).length > 0) {
         action.choices?.forEach(choice => {
-          if (!choice.targetSceneId) {
+          const mode = choiceJumpMode(choice);
+          if (mode !== 'linear' && !choice.targetSceneId) {
             issues.push({ id: `choice_without_target_${node.id}_${action.id}_${choice.id}`, severity: 'warning', message: `Choice "${choice.label}" has no target scene.`, sceneId: node.id, actionId: action.id });
-          } else if (!sceneIdSet.has(choice.targetSceneId)) {
+          } else if (choice.targetSceneId && !sceneIdSet.has(choice.targetSceneId)) {
             issues.push({ id: `choice_missing_scene_${node.id}_${action.id}_${choice.id}`, severity: 'error', message: `Choice "${choice.label}" targets missing scene: ${choice.targetSceneId}`, sceneId: node.id, actionId: action.id });
           }
           if (choice.targetActionId && !actionToScene.has(choice.targetActionId)) {
@@ -1110,6 +1184,11 @@ function validateProject(project: VNProjectState): ProjectValidationIssue[] {
           (choice.conditions || []).forEach(condition => {
             if (condition.variableKey && !variableKeys.has(condition.variableKey)) {
               issues.push({ id: `missing_condition_var_${node.id}_${action.id}_${choice.id}_${condition.id}`, severity: 'warning', message: `${choice.label} condition references missing variable "${condition.variableKey}"`, sceneId: node.id, actionId: action.id });
+            }
+          });
+          (choice.jumpConditions || []).forEach(condition => {
+            if (condition.variableKey && !variableKeys.has(condition.variableKey)) {
+              issues.push({ id: `missing_jump_condition_var_${node.id}_${action.id}_${choice.id}_${condition.id}`, severity: 'warning', message: `${choice.label} jump condition references missing variable "${condition.variableKey}"`, sceneId: node.id, actionId: action.id });
             }
           });
           (choice.effects || []).forEach(effect => {
@@ -1239,6 +1318,30 @@ function applyEffectsToVariables(
   });
 
   return next;
+}
+
+function isAffinityEffect(effect: VNEffect) {
+  return effect.type === 'add_affinity';
+}
+
+function upsertAffinityEffect(effects: VNEffect[] | undefined, variableKey: string, amount: number): VNEffect[] {
+  const current = effects || [];
+  const existing = current.find(isAffinityEffect);
+  return [
+    ...current.filter(effect => !isAffinityEffect(effect)),
+    {
+      ...(existing || {}),
+      id: existing?.id || createEffectId(),
+      type: 'add_affinity',
+      variableKey,
+      amount
+    }
+  ];
+}
+
+function clearAffinityEffects(effects: VNEffect[] | undefined): VNEffect[] | undefined {
+  const next = (effects || []).filter(effect => !isAffinityEffect(effect));
+  return next.length ? next : undefined;
 }
 
 function createProjectId() {
@@ -2837,6 +2940,9 @@ export function Workstation() {
   const activeNode = project.nodes.find(n => n.id === activeNodeId);
   const currentAction = activeNode?.actions[activeActionIdx];
   const activeChoiceBranches = choiceBranchesForScene(activeNode);
+  const selectedChoiceBranch = selectedSceneLink?.fromChoiceId
+    ? choiceBranchesForScene(sceneById(selectedSceneLink.fromSceneId)).find(branch => branch.actionId === selectedSceneLink.fromActionId && branch.choice.id === selectedSceneLink.fromChoiceId)
+    : undefined;
   const normalizedProjectAssets = project.assets.map(normalizeWorkspaceAsset);
   const assetById = (id?: string) => id ? normalizedProjectAssets.find(asset => asset.id === id) : undefined;
   const layoutSourceActions = activeNode?.actions.filter((action, index) => index !== activeActionIdx && action.layout) || [];
@@ -3290,8 +3396,8 @@ export function Workstation() {
             ...action,
             type: 'choice',
             choices: unboundIndex >= 0
-              ? choices.map((choice, choiceIndex) => choiceIndex === unboundIndex ? { ...choice, targetSceneId } : choice)
-              : [...choices, { id: createChoiceId(), label: nextChoiceLabel(choices), targetSceneId }]
+              ? choices.map((choice, choiceIndex) => choiceIndex === unboundIndex ? { ...choice, targetSceneId, jumpMode: (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') as VNChoiceJumpMode } : choice)
+              : [...choices, { id: createChoiceId(), label: nextChoiceLabel(choices), targetSceneId, jumpMode: 'direct' as VNChoiceJumpMode }]
           };
         })
       };
@@ -3305,7 +3411,7 @@ export function Workstation() {
           type: 'choice',
           speaker: guideAsset?.name || 'Narrator',
           text: '',
-          choices: [{ id: createChoiceId(), label: 'Option 1', targetSceneId }],
+          choices: [{ id: createChoiceId(), label: 'Option 1', targetSceneId, jumpMode: 'direct' as VNChoiceJumpMode }],
           startTime: 0,
           duration: DEFAULT_ACTION_DURATION,
           layout: { x: 0, y: 0, scale: 1 }
@@ -3319,7 +3425,7 @@ export function Workstation() {
       actions: node.actions.map((action, index) => index === lastActionIndex ? {
         ...action,
         type: 'choice',
-        choices: [...(action.choices || []), { id: createChoiceId(), label: nextChoiceLabel(action.choices), targetSceneId }]
+        choices: [...(action.choices || []), { id: createChoiceId(), label: nextChoiceLabel(action.choices), targetSceneId, jumpMode: 'direct' as VNChoiceJumpMode }]
       } : action)
     };
   };
@@ -3402,7 +3508,9 @@ export function Workstation() {
               choices: action.choices?.map(choice => choice.id === link.fromChoiceId ? {
                 ...choice,
                 targetSceneId: undefined,
-                targetActionId: undefined
+                targetActionId: undefined,
+                jumpMode: 'linear' as VNChoiceJumpMode,
+                jumpConditions: undefined
               } : choice)
             };
           })
@@ -3425,7 +3533,9 @@ export function Workstation() {
           choices: action.choices?.map(choice => ({
             ...choice,
             targetSceneId: undefined,
-            targetActionId: undefined
+            targetActionId: undefined,
+            jumpMode: 'linear' as VNChoiceJumpMode,
+            jumpConditions: undefined
           }))
         }))
       } : node)
@@ -3447,7 +3557,9 @@ export function Workstation() {
           choices: action.choices?.map(choice => choice.targetSceneId === nodeId ? {
             ...choice,
             targetSceneId: undefined,
-            targetActionId: undefined
+            targetActionId: undefined,
+            jumpMode: 'linear' as VNChoiceJumpMode,
+            jumpConditions: undefined
           } : choice)
         }))
       }))
@@ -3650,7 +3762,8 @@ export function Workstation() {
               choices: (action.choices || []).map(choice => choice.id === link.fromChoiceId ? {
                 ...choice,
                 targetSceneId: nextTargetSceneId,
-                targetActionId: nextTargetSceneId === choice.targetSceneId ? choice.targetActionId : undefined
+                targetActionId: nextTargetSceneId === choice.targetSceneId ? choice.targetActionId : undefined,
+                jumpMode: (nextTargetSceneId ? (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') : 'linear') as VNChoiceJumpMode
               } : choice)
             };
           })
@@ -3673,11 +3786,77 @@ export function Workstation() {
           choices: (action.choices || []).map(choice => choice.id === branch.choice.id ? {
             ...choice,
             targetSceneId: nextTargetSceneId,
-            targetActionId: nextTargetSceneId === choice.targetSceneId ? choice.targetActionId : undefined
+            targetActionId: nextTargetSceneId === choice.targetSceneId ? choice.targetActionId : undefined,
+            jumpMode: (nextTargetSceneId ? (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') : 'linear') as VNChoiceJumpMode
           } : choice)
         } : action)
       } : node)
     }));
+  };
+
+  const updateChoiceInProject = (
+    nodeId: string,
+    actionId: string,
+    choiceId: string,
+    updates: Partial<VNChoice>
+  ) => {
+    setProject(p => ({
+      ...p,
+      nodes: p.nodes.map(node => node.id === nodeId ? {
+        ...node,
+        actions: node.actions.map(action => action.id === actionId ? {
+          ...action,
+          choices: (action.choices || []).map(choice => choice.id === choiceId ? {
+            ...choice,
+            ...updates
+          } : choice)
+        } : action)
+      } : node)
+    }));
+  };
+
+  const bindChoiceBranchAffinityEvent = (branch: ChoiceBranchRow, variableKey: string, amount: number) => {
+    if (!variableKey) return;
+    updateChoiceInProject(branch.nodeId, branch.actionId, branch.choice.id, {
+      effects: upsertAffinityEffect(branch.choice.effects, variableKey, amount)
+    });
+  };
+
+  const clearChoiceBranchAffinityEvent = (branch: ChoiceBranchRow) => {
+    updateChoiceInProject(branch.nodeId, branch.actionId, branch.choice.id, {
+      effects: clearAffinityEffects(branch.choice.effects)
+    });
+  };
+
+  const updateChoiceBranchJumpMode = (branch: ChoiceBranchRow, mode: VNChoiceJumpMode) => {
+    updateChoiceInProject(branch.nodeId, branch.actionId, branch.choice.id, {
+      jumpMode: mode,
+      jumpConditions: mode === 'conditional'
+        ? (branch.choice.jumpConditions?.length ? branch.choice.jumpConditions : [defaultJumpCondition()])
+        : undefined,
+      targetSceneId: mode === 'linear' ? undefined : branch.choice.targetSceneId,
+      targetActionId: mode === 'linear' ? undefined : branch.choice.targetActionId
+    });
+  };
+
+  const updateChoiceBranchJumpCondition = (branch: ChoiceBranchRow, conditionIndex: number, updates: Partial<VNCondition>) => {
+    const conditions = branch.choice.jumpConditions?.length ? branch.choice.jumpConditions : [defaultJumpCondition()];
+    updateChoiceInProject(branch.nodeId, branch.actionId, branch.choice.id, {
+      jumpMode: 'conditional',
+      jumpConditions: conditions.map((condition, index) => index === conditionIndex ? { ...condition, ...updates } : condition)
+    });
+  };
+
+  const setChoiceBranchDisplayRange = (branch: ChoiceBranchRow, variableKey: string, min: string, max: string) => {
+    if (!variableKey) return;
+    const eventVariableKeys = new Set(eventVariableDefinitions.map(variable => variable.key));
+    const otherConditions = (branch.choice.conditions || []).filter(condition => !eventVariableKeys.has(condition.variableKey));
+    const nextConditions: VNCondition[] = [...otherConditions];
+    if (min.trim()) nextConditions.push({ id: createConditionId(), variableKey, operator: 'greater_or_equal', value: Number(min) });
+    if (max.trim()) nextConditions.push({ id: createConditionId(), variableKey, operator: 'less_or_equal', value: Number(max) });
+    updateChoiceInProject(branch.nodeId, branch.actionId, branch.choice.id, {
+      conditions: nextConditions.length ? nextConditions : undefined
+    });
   };
 
   const updateAction = (updates: Partial<VNAction>) => {
@@ -3736,7 +3915,7 @@ export function Workstation() {
                   const matches = options.choiceTarget?.choiceId
                     ? choice.id === options.choiceTarget.choiceId
                     : index === options.choiceTarget?.choiceIndex;
-                  return matches ? { ...choice, targetSceneId: node.id } : choice;
+                  return matches ? { ...choice, targetSceneId: node.id, jumpMode: (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') as VNChoiceJumpMode } : choice;
                 })
               };
             })
@@ -3772,11 +3951,13 @@ export function Workstation() {
           actions: node.actions.map(action => ({
             ...action,
             targetSceneId: action.targetSceneId === nodeId ? undefined : action.targetSceneId,
-            choices: action.choices?.map(choice => choice.targetSceneId === nodeId ? {
-              ...choice,
-              targetSceneId: undefined,
-              targetActionId: undefined
-            } : choice)
+          choices: action.choices?.map(choice => choice.targetSceneId === nodeId ? {
+            ...choice,
+            targetSceneId: undefined,
+            targetActionId: undefined,
+            jumpMode: 'linear' as VNChoiceJumpMode,
+            jumpConditions: undefined
+          } : choice)
           }))
         }));
       const entrySceneId = p.entrySceneId === nodeId ? nodes[0]?.id : p.entrySceneId;
@@ -3839,6 +4020,10 @@ export function Workstation() {
   const readyVoiceCount = normalizedProjectAssets.filter(asset => asset.type === 'audio' && asset.status === 'ready').length;
   const currentRuntimeScene = sceneById(activeNodeId);
   const variableDefinitions = project.variables || [];
+  const affinityVariableDefinitions = variableDefinitions.filter(variable => variable.type === 'number' && (variable.key.startsWith('affinity.') || variable.scope === 'character'));
+  const numericVariableDefinitions = variableDefinitions.filter(variable => variable.type === 'number');
+  const eventVariableDefinitions = affinityVariableDefinitions.length ? affinityVariableDefinitions : (numericVariableDefinitions.length ? numericVariableDefinitions : variableDefinitions);
+  const defaultEventVariable = eventVariableDefinitions[0] || variableDefinitions[0];
   const projectValidationIssues = validateProject(project);
   const validationErrorCount = projectValidationIssues.filter(issue => issue.severity === 'error').length;
   const validationWarningCount = projectValidationIssues.length - validationErrorCount;
@@ -4066,6 +4251,7 @@ export function Workstation() {
     setActiveActionIdx(nextIndex);
     const nextTimedAction = buildTimedActions(node.actions, assetById).find(item => item.index === nextIndex);
     setPlayheadTime(nextTimedAction?.startTime || 0);
+    setRuntimeVariables(values => applyEffectsToVariables(values, node.actions[nextIndex]?.effects, node.id));
     if (timelineMode === 'script') {
       playActionAudio(node.actions[nextIndex]);
     }
@@ -4090,6 +4276,7 @@ export function Workstation() {
       setActiveNodeId(entryNode.id);
       setActiveActionIdx(0);
       setPlayheadTime(buildTimedActions(entryNode.actions, assetById)[0]?.startTime || 0);
+      setRuntimeVariables(values => applyEffectsToVariables(values, entryNode.actions[0]?.effects, entryNode.id));
       setIsPlaying(true);
       if (timelineMode === 'script') playActionAudio(entryNode.actions[0]);
       return;
@@ -4102,7 +4289,28 @@ export function Workstation() {
     setVisitedSceneIds([activeNode.id]);
     setIsPlaying(true);
     setPlayheadTime(activeTimedAction?.startTime || 0);
+    setRuntimeVariables(values => applyEffectsToVariables(values, currentAction.effects, activeNode.id));
     if (timelineMode === 'script') playActionAudio(currentAction);
+  };
+
+  const continueLinearChoice = () => {
+    if (!activeNode) return false;
+    const nextIndex = activeActionIdx + 1;
+    if (nextIndex < activeNode.actions.length) {
+      const nextAction = activeNode.actions[nextIndex];
+      pushRuntimeHistory('choice_linear');
+      setActiveActionIdx(nextIndex);
+      setPlayheadTime(timedActions.find(item => item.index === nextIndex)?.startTime || 0);
+      setRuntimeVariables(values => applyEffectsToVariables(values, nextAction.effects, activeNode.id));
+      if (timelineMode === 'script') playActionAudio(nextAction);
+      return true;
+    }
+    if (activeNode.defaultNextSceneId) {
+      return goToScene(activeNode.defaultNextSceneId);
+    }
+    setIsPlaying(false);
+    stopAudio();
+    return false;
   };
 
   const advancePlaytest = () => {
@@ -4129,6 +4337,7 @@ export function Workstation() {
     pushRuntimeHistory('next_action');
     setActiveActionIdx(nextIndex);
     setPlayheadTime(timedActions.find(item => item.index === nextIndex)?.startTime || 0);
+    setRuntimeVariables(values => applyEffectsToVariables(values, nextAction.effects, activeNode.id));
     if (timelineMode === 'script') playActionAudio(nextAction);
   };
 
@@ -4151,6 +4360,8 @@ export function Workstation() {
         selectedAt: new Date().toISOString()
       }].slice(-120));
     }
+    const jumpMode = choiceJumpMode(choice);
+    const jumpAllowed = jumpMode !== 'conditional' || conditionsMet(choice.jumpConditions, runtimeVariables);
     setRuntimeVariables(values => applyEffectsToVariables(values, choice.effects, choice.targetSceneId || activeNode?.id));
     const markedSceneIds = (choice.effects || [])
       .filter(effect => effect.type === 'mark_visited')
@@ -4159,16 +4370,17 @@ export function Workstation() {
     if (markedSceneIds.length) {
       setVisitedSceneIds(ids => Array.from(new Set([...ids, ...markedSceneIds])));
     }
-    if (choice.targetSceneId) {
+    if (jumpMode !== 'linear' && jumpAllowed && choice.targetSceneId) {
       goToScene(choice.targetSceneId, choice.targetActionId);
       return;
     }
-    const actionTarget = findActionLocation(choice.targetActionId || choice.nextId);
+    const actionTarget = jumpMode !== 'linear' && jumpAllowed ? findActionLocation(choice.targetActionId || choice.nextId) : undefined;
     if (actionTarget) {
       goToScene(actionTarget.node.id, actionTarget.node.actions[actionTarget.actionIndex]?.id);
       return;
     }
-    setWorkspaceNotice(t('choiceNoTarget', { label: choice.label }));
+    if (continueLinearChoice()) return;
+    setWorkspaceNotice(jumpMode === 'conditional' && !jumpAllowed ? t('conditionLocked') : t('choiceNoTarget', { label: choice.label }));
   };
 
   const actionText = (action?: VNAction) => {
@@ -4220,6 +4432,196 @@ export function Workstation() {
     setWorkspaceNotice(t('voiceDurationSynced', { seconds: duration.toFixed(2) }));
   };
 
+  const renderEventVariableOptions = (selectedKey?: string) => (
+    <>
+      <option value="">{t('noVariables')}</option>
+      {eventVariableDefinitions.map(variable => (
+        <option key={variable.key} value={variable.key}>{variable.label || variable.key}</option>
+      ))}
+      {selectedKey && !eventVariableDefinitions.some(variable => variable.key === selectedKey) && (
+        <option value={selectedKey}>{selectedKey}</option>
+      )}
+    </>
+  );
+
+  const renderAffinityBindingControls = (
+    effects: VNEffect[] | undefined,
+    onBind: (variableKey: string, amount: number) => void,
+    onClear: () => void,
+    idPrefix: string
+  ) => {
+    const effect = effects?.find(isAffinityEffect);
+    const variableKey = effect?.variableKey || defaultEventVariable?.key || '';
+    const signedAmount = Number(effect?.amount ?? 1);
+    const magnitude = Math.max(1, Math.abs(signedAmount || 1));
+    const sign = signedAmount < 0 ? -1 : 1;
+    return (
+      <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] uppercase tracking-widest text-white/35">{t('affinityEvent')}</span>
+          {effect && <span className="rounded-full border border-primary/25 px-1.5 py-0.5 text-[10px] text-primary">{signedAmount > 0 ? '+' : ''}{signedAmount}</span>}
+        </div>
+        <div className="grid grid-cols-[1fr_4.5rem] gap-2">
+          <select
+            id={`${idPrefix}_affinity_key`}
+            className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+            value={variableKey}
+            onChange={event => onBind(event.target.value, signedAmount || 1)}
+            disabled={!eventVariableDefinitions.length}
+          >
+            {renderEventVariableOptions(variableKey)}
+          </select>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+            value={magnitude}
+            onChange={event => onBind(variableKey, sign * Math.max(1, Number(event.target.value || 1)))}
+            disabled={!variableKey}
+          />
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            type="button"
+            onClick={() => onBind(variableKey, magnitude)}
+            disabled={!variableKey}
+            className="h-7 rounded-full border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('increaseAffinity')}
+          </button>
+          <button
+            type="button"
+            onClick={() => onBind(variableKey, -magnitude)}
+            disabled={!variableKey}
+            className="h-7 rounded-full border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('decreaseAffinity')}
+          </button>
+          <button
+            type="button"
+            onClick={onClear}
+            disabled={!effect}
+            className="h-7 rounded-full border border-white/10 text-[10px] text-white/45 hover:border-red-300/55 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('clear')}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const choiceDisplayRange = (choice: VNChoice) => {
+    const condition = (choice.conditions || []).find(item => eventVariableDefinitions.some(variable => variable.key === item.variableKey)) || choice.conditions?.[0];
+    const variableKey = condition?.variableKey || defaultEventVariable?.key || '';
+    const conditions = (choice.conditions || []).filter(item => item.variableKey === variableKey);
+    const minCondition = conditions.find(item => item.operator === 'greater_or_equal' || item.operator === 'greater_than' || item.operator === 'equals');
+    const maxCondition = conditions.find(item => item.operator === 'less_or_equal' || item.operator === 'less_than' || item.operator === 'equals');
+    return {
+      variableKey,
+      min: minCondition?.value ?? '',
+      max: maxCondition?.value ?? ''
+    };
+  };
+
+  const renderChoiceBindingControls = (
+    choice: VNChoice,
+    choiceIndex: number,
+    handlers: {
+      setTarget: (sceneId: string) => void;
+      setJumpMode: (mode: VNChoiceJumpMode) => void;
+      setJumpCondition: (conditionIndex: number, updates: Partial<VNCondition>) => void;
+      bindAffinity: (variableKey: string, amount: number) => void;
+      clearAffinity: () => void;
+      setDisplayRange: (variableKey: string, min: string, max: string) => void;
+    },
+    idPrefix: string
+  ) => {
+    const mode = choiceJumpMode(choice);
+    const jumpCondition = choice.jumpConditions?.[0] || defaultJumpCondition();
+    const displayRange = choiceDisplayRange(choice);
+    return (
+      <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
+        <div className="text-[10px] uppercase tracking-widest text-white/35">{t('eventBinding')}</div>
+        <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-2">
+          <div className="text-[10px] uppercase tracking-widest text-white/35">{t('jumpEvent')}</div>
+          <div className="grid grid-cols-[1fr_1fr] gap-2">
+            <label className="space-y-1">
+              <span className="text-[10px] text-white/35">{t('jumpMode')}</span>
+              <select
+                className="h-8 w-full rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                value={mode}
+                onChange={event => handlers.setJumpMode(normalizeChoiceJumpMode(event.target.value))}
+              >
+                <option value="linear">{t('linearJump')}</option>
+                <option value="direct">{t('directJump')}</option>
+                <option value="conditional">{t('conditionalJump')}</option>
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] text-white/35">{t('targetScene')}</span>
+              <select
+                className="h-8 w-full rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                value={choice.targetSceneId || ''}
+                onChange={event => handlers.setTarget(event.target.value)}
+                disabled={mode === 'linear'}
+              >
+                <option value="">{t('noTargetScene')}</option>
+                {project.nodes.map(node => (
+                  <option key={node.id} value={node.id}>{node.title}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {mode === 'conditional' && (
+            <div className="grid grid-cols-[1fr_4.5rem] gap-2">
+              <select
+                className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                value={jumpCondition.variableKey}
+                onChange={event => handlers.setJumpCondition(0, { variableKey: event.target.value })}
+              >
+                {renderEventVariableOptions(jumpCondition.variableKey)}
+              </select>
+              <input
+                type="number"
+                step={1}
+                className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                value={String(jumpCondition.value ?? 1)}
+                onChange={event => handlers.setJumpCondition(0, { value: Number(event.target.value || 0), operator: 'greater_or_equal' })}
+                aria-label={t('jumpThreshold')}
+              />
+            </div>
+          )}
+        </div>
+        {renderAffinityBindingControls(choice.effects, handlers.bindAffinity, handlers.clearAffinity, `${idPrefix}_${choiceIndex}`)}
+        <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-2">
+          <div className="text-[10px] uppercase tracking-widest text-white/35">{t('displayEvent')}</div>
+          <div className="grid grid-cols-[1fr_4rem_4rem] gap-2">
+            <select
+              className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+              value={displayRange.variableKey}
+              onChange={event => handlers.setDisplayRange(event.target.value, String(displayRange.min ?? ''), String(displayRange.max ?? ''))}
+            >
+              {renderEventVariableOptions(displayRange.variableKey)}
+            </select>
+            <input
+              className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+              value={String(displayRange.min ?? '')}
+              onChange={event => handlers.setDisplayRange(displayRange.variableKey, event.target.value, String(displayRange.max ?? ''))}
+              placeholder="min"
+            />
+            <input
+              className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+              value={String(displayRange.max ?? '')}
+              onChange={event => handlers.setDisplayRange(displayRange.variableKey, String(displayRange.min ?? ''), event.target.value)}
+              placeholder="max"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const updateChoicesFromText = (value: string) => {
     const choices = value
       .split('\n')
@@ -4242,6 +4644,73 @@ export function Workstation() {
         ...updates
       } : choice)
     });
+  };
+
+  const bindActionAffinityEvent = (variableKey: string, amount: number) => {
+    if (!currentAction || !variableKey) return;
+    updateAction({ effects: upsertAffinityEffect(currentAction.effects, variableKey, amount) });
+  };
+
+  const clearActionAffinityEvent = () => {
+    if (!currentAction) return;
+    updateAction({ effects: clearAffinityEffects(currentAction.effects) });
+  };
+
+  const bindChoiceAffinityEvent = (choiceIndex: number, variableKey: string, amount: number) => {
+    const choice = currentAction?.choices?.[choiceIndex];
+    if (!choice || !variableKey) return;
+    updateChoiceOption(choiceIndex, { effects: upsertAffinityEffect(choice.effects, variableKey, amount) });
+  };
+
+  const clearChoiceAffinityEvent = (choiceIndex: number) => {
+    const choice = currentAction?.choices?.[choiceIndex];
+    if (!choice) return;
+    updateChoiceOption(choiceIndex, { effects: clearAffinityEffects(choice.effects) });
+  };
+
+  const defaultJumpCondition = (variableKey = defaultEventVariable?.key || ''): VNCondition => ({
+    id: createConditionId(),
+    variableKey,
+    operator: 'greater_or_equal',
+    value: defaultEventVariable?.type === 'number' ? 1 : defaultValueForVariable(defaultEventVariable || { key: '', label: '', type: 'number', scope: 'character' })
+  });
+
+  const updateChoiceJumpMode = (choiceIndex: number, mode: VNChoiceJumpMode) => {
+    const choice = currentAction?.choices?.[choiceIndex];
+    if (!choice) return;
+    updateChoiceOption(choiceIndex, {
+      jumpMode: mode,
+      jumpConditions: mode === 'conditional'
+        ? (choice.jumpConditions?.length ? choice.jumpConditions : [defaultJumpCondition()])
+        : undefined,
+      targetSceneId: mode === 'linear' ? undefined : choice.targetSceneId,
+      targetActionId: mode === 'linear' ? undefined : choice.targetActionId
+    });
+  };
+
+  const updateChoiceJumpCondition = (choiceIndex: number, conditionIndex: number, updates: Partial<VNCondition>) => {
+    const choice = currentAction?.choices?.[choiceIndex];
+    if (!choice) return;
+    const conditions = choice.jumpConditions?.length ? choice.jumpConditions : [defaultJumpCondition()];
+    updateChoiceOption(choiceIndex, {
+      jumpMode: 'conditional',
+      jumpConditions: conditions.map((condition, index) => index === conditionIndex ? { ...condition, ...updates } : condition)
+    });
+  };
+
+  const setChoiceDisplayRange = (choiceIndex: number, variableKey: string, min: string, max: string) => {
+    const choice = currentAction?.choices?.[choiceIndex];
+    if (!choice || !variableKey) return;
+    const eventVariableKeys = new Set(eventVariableDefinitions.map(variable => variable.key));
+    const otherConditions = (choice.conditions || []).filter(condition => !eventVariableKeys.has(condition.variableKey));
+    const nextConditions: VNCondition[] = [...otherConditions];
+    if (min.trim()) {
+      nextConditions.push({ id: createConditionId(), variableKey, operator: 'greater_or_equal', value: Number(min) });
+    }
+    if (max.trim()) {
+      nextConditions.push({ id: createConditionId(), variableKey, operator: 'less_or_equal', value: Number(max) });
+    }
+    updateChoiceOption(choiceIndex, { conditions: nextConditions.length ? nextConditions : undefined });
   };
 
   const updateChoiceCondition = (choiceIndex: number, conditionIndex: number, updates: Partial<VNCondition>) => {
@@ -4323,7 +4792,7 @@ export function Workstation() {
       type: 'choice',
       choices: [
         ...nextChoices,
-        { id: createChoiceId(), label: `Option ${nextChoices.length + 1}` }
+        { id: createChoiceId(), label: `Option ${nextChoices.length + 1}`, jumpMode: 'linear' as VNChoiceJumpMode }
       ]
     });
   };
@@ -5114,6 +5583,7 @@ export function Workstation() {
           const node = sceneById(layout.id);
           if (!node) return null;
           const links = outgoingLinksBySceneId.get(node.id) || [];
+          const branches = choiceBranchesForScene(node);
           const isolated = project.entrySceneId !== node.id && !incomingSceneIds.has(node.id);
           return (
             <React.Fragment key={`floating_graph_group_${node.id}`}>
@@ -5156,6 +5626,52 @@ export function Workstation() {
               <div className="mt-2 grid grid-cols-2 gap-1 text-[9px] text-white/35">
                 <span>{node.actions.length} {t('action')}</span>
                 <span>{links.length} {t('outgoing')}</span>
+              </div>
+              <div className="mt-2 space-y-1 overflow-hidden">
+                {branches.slice(0, 2).map(branch => {
+                  const mode = choiceJumpMode(branch.choice);
+                  const disabled = !conditionsMet(branch.choice.conditions, runtimeVariables);
+                  const link = sceneLinks.find(item => item.fromSceneId === branch.nodeId && item.fromActionId === branch.actionId && item.fromChoiceId === branch.choice.id);
+                  return (
+                    <button
+                      key={`${branch.actionId}_${branch.choice.id}`}
+                      type="button"
+                      data-scene-graph-interactive="true"
+                      onPointerDown={event => event.stopPropagation()}
+                      onClick={event => {
+                        event.stopPropagation();
+                        setActiveNodeId(branch.nodeId);
+                        setActiveActionIdx(branch.actionIndex);
+                        setSelectedSceneLinkId(link?.id || '');
+                        setRightSidebarOpen(true);
+                        setInspectorTab('branch');
+                      }}
+                      onContextMenu={event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setActiveNodeId(branch.nodeId);
+                        setActiveActionIdx(branch.actionIndex);
+                        setSelectedSceneLinkId(link?.id || '');
+                        setRightSidebarOpen(true);
+                        setInspectorTab('branch');
+                      }}
+                      className={`flex h-5 w-full items-center gap-1 rounded border px-1.5 text-left text-[9px] transition-colors ${
+                        disabled
+                          ? 'border-white/5 bg-white/[0.02] text-white/25'
+                          : selectedSceneLinkId && link?.id === selectedSceneLinkId
+                            ? 'border-primary/45 bg-primary/[0.10] text-primary'
+                            : 'border-white/10 bg-white/[0.04] text-white/55 hover:border-primary/45 hover:text-primary'
+                      }`}
+                      title={`${branch.choice.label} - ${mode}`}
+                    >
+                      <span className="min-w-0 flex-1 truncate">{branch.choice.label}</span>
+                      <span className="shrink-0 text-[8px] uppercase opacity-60">{mode === 'conditional' ? 'if' : mode === 'direct' ? 'go' : 'line'}</span>
+                    </button>
+                  );
+                })}
+                {branches.length > 2 && (
+                  <div className="truncate text-[9px] text-white/25">+{branches.length - 2} {t('choices')}</div>
+                )}
               </div>
             </div>
             <button
@@ -5257,6 +5773,14 @@ export function Workstation() {
                 ))}
             </select>
           </label>
+          {selectedChoiceBranch && renderChoiceBindingControls(selectedChoiceBranch.choice, selectedChoiceBranch.choiceIndex, {
+            setTarget: sceneId => updateChoiceBranchTarget(selectedChoiceBranch, sceneId),
+            setJumpMode: mode => updateChoiceBranchJumpMode(selectedChoiceBranch, mode),
+            setJumpCondition: (conditionIndex, updates) => updateChoiceBranchJumpCondition(selectedChoiceBranch, conditionIndex, updates),
+            bindAffinity: (variableKey, amount) => bindChoiceBranchAffinityEvent(selectedChoiceBranch, variableKey, amount),
+            clearAffinity: () => clearChoiceBranchAffinityEvent(selectedChoiceBranch),
+            setDisplayRange: (variableKey, min, max) => setChoiceBranchDisplayRange(selectedChoiceBranch, variableKey, min, max)
+          }, `selected_link_${selectedChoiceBranch.choice.id}`)}
           <button
             type="button"
             onClick={() => focusSceneGraphLink(selectedSceneLink)}
@@ -5334,6 +5858,14 @@ export function Workstation() {
                         {t('new')}
                       </button>
                     </div>
+                    {renderChoiceBindingControls(branch.choice, branch.choiceIndex, {
+                      setTarget: sceneId => updateChoiceBranchTarget(branch, sceneId),
+                      setJumpMode: mode => updateChoiceBranchJumpMode(branch, mode),
+                      setJumpCondition: (conditionIndex, updates) => updateChoiceBranchJumpCondition(branch, conditionIndex, updates),
+                      bindAffinity: (variableKey, amount) => bindChoiceBranchAffinityEvent(branch, variableKey, amount),
+                      clearAffinity: () => clearChoiceBranchAffinityEvent(branch),
+                      setDisplayRange: (variableKey, min, max) => setChoiceBranchDisplayRange(branch, variableKey, min, max)
+                    }, `branch_${branch.choice.id}`)}
                   </div>
                 ))}
                 {activeChoiceBranches.length === 0 && (
@@ -5923,7 +6455,9 @@ export function Workstation() {
                   <div className="mt-4 flex flex-wrap gap-2">
                     {currentAction.choices?.map((choice, index) => {
                       const conditionOk = conditionsMet(choice.conditions, runtimeVariables);
-                      const hasTarget = Boolean(choice.targetSceneId || choice.targetActionId || choice.nextId);
+                      const mode = choiceJumpMode(choice);
+                      const hasTarget = mode === 'linear' || Boolean(choice.targetSceneId || choice.targetActionId || choice.nextId);
+                      const jumpOk = mode !== 'conditional' || conditionsMet(choice.jumpConditions, runtimeVariables);
                       return (
                         <button
                           key={`${choice.label}_${index}`}
@@ -5936,7 +6470,13 @@ export function Workstation() {
                         >
                           <span className="block">{conditionOk ? choice.label : (choice.disabledText || choice.label)}</span>
                           <span className="block text-[10px] text-white/35">
-                            {!conditionOk ? t('conditionLocked') : sceneById(choice.targetSceneId)?.title || (choice.targetActionId ? t('actionTarget') : t('noTarget'))}
+                            {!conditionOk
+                              ? t('conditionLocked')
+                              : mode === 'linear'
+                                ? t('linearJump')
+                                : mode === 'conditional' && !jumpOk
+                                  ? t('linearJump')
+                                  : sceneById(choice.targetSceneId)?.title || (choice.targetActionId ? t('actionTarget') : t('noTarget'))}
                           </span>
                         </button>
                       );
@@ -6409,6 +6949,16 @@ export function Workstation() {
                         />
                       </section>
 
+                      <section className="space-y-2">
+                        <label className="text-[10px] uppercase tracking-widest text-white/40">{t('eventBinding')}</label>
+                        {renderAffinityBindingControls(
+                          currentAction.effects,
+                          bindActionAffinityEvent,
+                          clearActionAffinityEvent,
+                          `action_${currentAction.id}`
+                        )}
+                      </section>
+
                       <section className="space-y-3 rounded-lg border border-white/10 bg-white/[0.03] p-3">
                         <div className="flex items-center justify-between">
                           <label className="text-[10px] uppercase tracking-widest text-white/40">{t('timeline')}</label>
@@ -6529,7 +7079,8 @@ export function Workstation() {
                                     value={choice.targetSceneId || ''}
                                     onChange={event => updateChoiceOption(index, {
                                       targetSceneId: event.target.value || undefined,
-                                      targetActionId: undefined
+                                      targetActionId: undefined,
+                                      jumpMode: (event.target.value ? (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') : 'linear') as VNChoiceJumpMode
                                     })}
                                   >
                                     <option value="">{t('noTargetScene')}</option>
@@ -6545,6 +7096,18 @@ export function Workstation() {
                                     {t('new')}
                                   </button>
                                 </div>
+                                {renderChoiceBindingControls(choice, index, {
+                                  setTarget: sceneId => updateChoiceOption(index, {
+                                    targetSceneId: sceneId || undefined,
+                                    targetActionId: undefined,
+                                    jumpMode: (sceneId ? (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') : 'linear') as VNChoiceJumpMode
+                                  }),
+                                  setJumpMode: mode => updateChoiceJumpMode(index, mode),
+                                  setJumpCondition: (conditionIndex, updates) => updateChoiceJumpCondition(index, conditionIndex, updates),
+                                  bindAffinity: (variableKey, amount) => bindChoiceAffinityEvent(index, variableKey, amount),
+                                  clearAffinity: () => clearChoiceAffinityEvent(index),
+                                  setDisplayRange: (variableKey, min, max) => setChoiceDisplayRange(index, variableKey, min, max)
+                                }, `choice_${choice.id}`)}
                                 <div className="mt-3 border-t border-white/10 pt-3">
                                   <div className="mb-2 flex items-center justify-between">
                                     <span className="text-[10px] uppercase tracking-widest text-white/35">{t('conditions')}</span>
