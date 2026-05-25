@@ -4456,56 +4456,58 @@ export function Workstation() {
     const magnitude = Math.max(1, Math.abs(signedAmount || 1));
     const sign = signedAmount < 0 ? -1 : 1;
     return (
-      <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-white/35">{t('affinityEvent')}</span>
+      <div className="grid gap-2 py-3 sm:grid-cols-[5.25rem_minmax(0,1fr)] sm:items-start">
+        <div className="flex items-center justify-between gap-2 sm:block">
+          <span className="text-[10px] uppercase tracking-widest text-white/40">{t('affinityEvent')}</span>
           {effect && <span className="rounded-full border border-primary/25 px-1.5 py-0.5 text-[10px] text-primary">{signedAmount > 0 ? '+' : ''}{signedAmount}</span>}
         </div>
-        <div className="grid grid-cols-[1fr_4.5rem] gap-2">
-          <select
-            id={`${idPrefix}_affinity_key`}
-            className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-            value={variableKey}
-            onChange={event => onBind(event.target.value, signedAmount || 1)}
-            disabled={!eventVariableDefinitions.length}
-          >
-            {renderEventVariableOptions(variableKey)}
-          </select>
-          <input
-            type="number"
-            min={1}
-            step={1}
-            className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-            value={magnitude}
-            onChange={event => onBind(variableKey, sign * Math.max(1, Number(event.target.value || 1)))}
-            disabled={!variableKey}
-          />
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <button
-            type="button"
-            onClick={() => onBind(variableKey, magnitude)}
-            disabled={!variableKey}
-            className="h-7 rounded-full border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {t('increaseAffinity')}
-          </button>
-          <button
-            type="button"
-            onClick={() => onBind(variableKey, -magnitude)}
-            disabled={!variableKey}
-            className="h-7 rounded-full border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {t('decreaseAffinity')}
-          </button>
-          <button
-            type="button"
-            onClick={onClear}
-            disabled={!effect}
-            className="h-7 rounded-full border border-white/10 text-[10px] text-white/45 hover:border-red-300/55 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {t('clear')}
-          </button>
+        <div className="min-w-0 space-y-2">
+          <div className="grid grid-cols-[minmax(0,1fr)_4.75rem] gap-2">
+            <select
+              id={`${idPrefix}_affinity_key`}
+              className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+              value={variableKey}
+              onChange={event => onBind(event.target.value, signedAmount || 1)}
+              disabled={!eventVariableDefinitions.length}
+            >
+              {renderEventVariableOptions(variableKey)}
+            </select>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+              value={magnitude}
+              onChange={event => onBind(variableKey, sign * Math.max(1, Number(event.target.value || 1)))}
+              disabled={!variableKey}
+            />
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => onBind(variableKey, magnitude)}
+              disabled={!variableKey}
+              className="h-7 rounded border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {t('increaseAffinity')}
+            </button>
+            <button
+              type="button"
+              onClick={() => onBind(variableKey, -magnitude)}
+              disabled={!variableKey}
+              className="h-7 rounded border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {t('decreaseAffinity')}
+            </button>
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={!effect}
+              className="h-7 rounded border border-white/10 text-[10px] text-white/45 hover:border-red-300/55 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {t('clear')}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -4534,88 +4536,109 @@ export function Workstation() {
       bindAffinity: (variableKey: string, amount: number) => void;
       clearAffinity: () => void;
       setDisplayRange: (variableKey: string, min: string, max: string) => void;
+      createTarget?: () => void;
+      showTarget?: boolean;
     },
     idPrefix: string
   ) => {
     const mode = choiceJumpMode(choice);
     const jumpCondition = choice.jumpConditions?.[0] || defaultJumpCondition();
     const displayRange = choiceDisplayRange(choice);
+    const showTarget = handlers.showTarget !== false;
+    const eventRowClass = 'grid gap-2 py-3 sm:grid-cols-[5.25rem_minmax(0,1fr)] sm:items-start';
+    const eventLabelClass = 'text-[10px] uppercase tracking-widest text-white/40';
     return (
-      <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
-        <div className="text-[10px] uppercase tracking-widest text-white/35">{t('eventBinding')}</div>
-        <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-2">
-          <div className="text-[10px] uppercase tracking-widest text-white/35">{t('jumpEvent')}</div>
-          <div className="grid grid-cols-[1fr_1fr] gap-2">
-            <label className="space-y-1">
-              <span className="text-[10px] text-white/35">{t('jumpMode')}</span>
+      <div className="mt-3 border-t border-white/10 pt-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[10px] uppercase tracking-widest text-white/40">{t('eventBinding')}</div>
+          <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/45">
+            {mode === 'conditional' ? t('conditionalJump') : mode === 'direct' ? t('directJump') : t('linearJump')}
+          </span>
+        </div>
+        <div className="mt-1 divide-y divide-white/10">
+          <div className={eventRowClass}>
+            <div className={eventLabelClass}>{t('jumpEvent')}</div>
+            <div className="min-w-0 space-y-2">
               <select
                 className="h-8 w-full rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
                 value={mode}
                 onChange={event => handlers.setJumpMode(normalizeChoiceJumpMode(event.target.value))}
+                aria-label={t('jumpMode')}
               >
                 <option value="linear">{t('linearJump')}</option>
                 <option value="direct">{t('directJump')}</option>
                 <option value="conditional">{t('conditionalJump')}</option>
               </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-[10px] text-white/35">{t('targetScene')}</span>
-              <select
-                className="h-8 w-full rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-                value={choice.targetSceneId || ''}
-                onChange={event => handlers.setTarget(event.target.value)}
-                disabled={mode === 'linear'}
-              >
-                <option value="">{t('noTargetScene')}</option>
-                {project.nodes.map(node => (
-                  <option key={node.id} value={node.id}>{node.title}</option>
-                ))}
-              </select>
-            </label>
+              {showTarget && (
+                <div className={handlers.createTarget ? 'grid grid-cols-[minmax(0,1fr)_3rem] gap-2' : ''}>
+                  <select
+                    className="h-8 w-full rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                    value={choice.targetSceneId || ''}
+                    onChange={event => handlers.setTarget(event.target.value)}
+                    disabled={mode === 'linear'}
+                    aria-label={t('targetScene')}
+                  >
+                    <option value="">{t('noTargetScene')}</option>
+                    {project.nodes.map(node => (
+                      <option key={node.id} value={node.id}>{node.title}</option>
+                    ))}
+                  </select>
+                  {handlers.createTarget && (
+                    <button
+                      type="button"
+                      onClick={handlers.createTarget}
+                      className="h-8 rounded border border-white/10 text-[10px] text-white/55 hover:border-primary hover:text-primary"
+                    >
+                      {t('new')}
+                    </button>
+                  )}
+                </div>
+              )}
+              {mode === 'conditional' && (
+                <div className="grid grid-cols-[minmax(0,1fr)_4.75rem] gap-2">
+                  <select
+                    className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                    value={jumpCondition.variableKey}
+                    onChange={event => handlers.setJumpCondition(0, { variableKey: event.target.value })}
+                  >
+                    {renderEventVariableOptions(jumpCondition.variableKey)}
+                  </select>
+                  <input
+                    type="number"
+                    step={1}
+                    className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                    value={String(jumpCondition.value ?? 1)}
+                    onChange={event => handlers.setJumpCondition(0, { value: Number(event.target.value || 0), operator: 'greater_or_equal' })}
+                    aria-label={t('jumpThreshold')}
+                  />
+                </div>
+              )}
+            </div>
           </div>
-          {mode === 'conditional' && (
-            <div className="grid grid-cols-[1fr_4.5rem] gap-2">
+          {renderAffinityBindingControls(choice.effects, handlers.bindAffinity, handlers.clearAffinity, `${idPrefix}_${choiceIndex}`)}
+          <div className={eventRowClass}>
+            <div className={eventLabelClass}>{t('displayEvent')}</div>
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_4rem_4rem] gap-2">
               <select
                 className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-                value={jumpCondition.variableKey}
-                onChange={event => handlers.setJumpCondition(0, { variableKey: event.target.value })}
+                value={displayRange.variableKey}
+                onChange={event => handlers.setDisplayRange(event.target.value, String(displayRange.min ?? ''), String(displayRange.max ?? ''))}
               >
-                {renderEventVariableOptions(jumpCondition.variableKey)}
+                {renderEventVariableOptions(displayRange.variableKey)}
               </select>
               <input
-                type="number"
-                step={1}
                 className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-                value={String(jumpCondition.value ?? 1)}
-                onChange={event => handlers.setJumpCondition(0, { value: Number(event.target.value || 0), operator: 'greater_or_equal' })}
-                aria-label={t('jumpThreshold')}
+                value={String(displayRange.min ?? '')}
+                onChange={event => handlers.setDisplayRange(displayRange.variableKey, event.target.value, String(displayRange.max ?? ''))}
+                placeholder="min"
+              />
+              <input
+                className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
+                value={String(displayRange.max ?? '')}
+                onChange={event => handlers.setDisplayRange(displayRange.variableKey, String(displayRange.min ?? ''), event.target.value)}
+                placeholder="max"
               />
             </div>
-          )}
-        </div>
-        {renderAffinityBindingControls(choice.effects, handlers.bindAffinity, handlers.clearAffinity, `${idPrefix}_${choiceIndex}`)}
-        <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-2">
-          <div className="text-[10px] uppercase tracking-widest text-white/35">{t('displayEvent')}</div>
-          <div className="grid grid-cols-[1fr_4rem_4rem] gap-2">
-            <select
-              className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-              value={displayRange.variableKey}
-              onChange={event => handlers.setDisplayRange(event.target.value, String(displayRange.min ?? ''), String(displayRange.max ?? ''))}
-            >
-              {renderEventVariableOptions(displayRange.variableKey)}
-            </select>
-            <input
-              className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-              value={String(displayRange.min ?? '')}
-              onChange={event => handlers.setDisplayRange(displayRange.variableKey, event.target.value, String(displayRange.max ?? ''))}
-              placeholder="min"
-            />
-            <input
-              className="h-8 rounded border border-white/10 bg-black px-2 text-[10px] text-white/70 outline-none focus:border-primary"
-              value={String(displayRange.max ?? '')}
-              onChange={event => handlers.setDisplayRange(displayRange.variableKey, String(displayRange.min ?? ''), event.target.value)}
-              placeholder="max"
-            />
           </div>
         </div>
       </div>
@@ -5779,7 +5802,8 @@ export function Workstation() {
             setJumpCondition: (conditionIndex, updates) => updateChoiceBranchJumpCondition(selectedChoiceBranch, conditionIndex, updates),
             bindAffinity: (variableKey, amount) => bindChoiceBranchAffinityEvent(selectedChoiceBranch, variableKey, amount),
             clearAffinity: () => clearChoiceBranchAffinityEvent(selectedChoiceBranch),
-            setDisplayRange: (variableKey, min, max) => setChoiceBranchDisplayRange(selectedChoiceBranch, variableKey, min, max)
+            setDisplayRange: (variableKey, min, max) => setChoiceBranchDisplayRange(selectedChoiceBranch, variableKey, min, max),
+            showTarget: false
           }, `selected_link_${selectedChoiceBranch.choice.id}`)}
           <button
             type="button"
@@ -5830,33 +5854,21 @@ export function Workstation() {
                     ))}
                 </select>
               </label>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {activeChoiceBranches.map(branch => (
-                  <div key={`${branch.actionId}_${branch.choice.id}`} className="rounded border border-white/10 bg-black/25 p-2">
-                    <div className="mb-1 flex items-center gap-2 text-[10px] text-white/45">
-                      <span className="min-w-0 flex-1 truncate">{branch.choice.label}</span>
+                  <article key={`${branch.actionId}_${branch.choice.id}`} className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="min-w-0 flex-1 space-y-1">
+                        <span className="text-[10px] uppercase tracking-widest text-white/35">{t('option')} #{branch.choiceIndex + 1}</span>
+                        <input
+                          className="h-8 w-full rounded border border-white/10 bg-black px-2 text-xs text-white/80 outline-none focus:border-primary"
+                          value={branch.choice.label}
+                          onChange={event => updateChoiceInProject(branch.nodeId, branch.actionId, branch.choice.id, { label: event.target.value })}
+                        />
+                      </label>
                       {branch.choice.conditions?.length ? (
-                        <span className="rounded-full border border-primary/25 px-1.5 py-0.5 text-primary">{branch.choice.conditions.length} {t('conditions')}</span>
+                        <span className="mt-5 shrink-0 rounded-full border border-primary/25 px-1.5 py-0.5 text-[10px] text-primary">{branch.choice.conditions.length} {t('conditions')}</span>
                       ) : null}
-                    </div>
-                    <div className="grid grid-cols-[1fr_auto] gap-2">
-                      <select
-                        className="h-8 min-w-0 rounded border border-white/10 bg-black px-2 text-[10px] text-white/75 outline-none focus:border-primary"
-                        value={branch.choice.targetSceneId || ''}
-                        onChange={event => updateChoiceBranchTarget(branch, event.target.value)}
-                      >
-                        <option value="">{t('noTargetScene')}</option>
-                        {project.nodes.map(node => (
-                          <option key={node.id} value={node.id}>{node.title}</option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => createSceneForChoiceBranch(branch)}
-                        className="h-8 rounded border border-white/10 px-2 text-[10px] text-white/55 hover:border-primary hover:text-primary"
-                      >
-                        {t('new')}
-                      </button>
                     </div>
                     {renderChoiceBindingControls(branch.choice, branch.choiceIndex, {
                       setTarget: sceneId => updateChoiceBranchTarget(branch, sceneId),
@@ -5864,9 +5876,10 @@ export function Workstation() {
                       setJumpCondition: (conditionIndex, updates) => updateChoiceBranchJumpCondition(branch, conditionIndex, updates),
                       bindAffinity: (variableKey, amount) => bindChoiceBranchAffinityEvent(branch, variableKey, amount),
                       clearAffinity: () => clearChoiceBranchAffinityEvent(branch),
-                      setDisplayRange: (variableKey, min, max) => setChoiceBranchDisplayRange(branch, variableKey, min, max)
+                      setDisplayRange: (variableKey, min, max) => setChoiceBranchDisplayRange(branch, variableKey, min, max),
+                      createTarget: () => createSceneForChoiceBranch(branch)
                     }, `branch_${branch.choice.id}`)}
-                  </div>
+                  </article>
                 ))}
                 {activeChoiceBranches.length === 0 && (
                   <div className="rounded border border-dashed border-white/10 p-3 text-[10px] text-white/30">
@@ -7073,29 +7086,6 @@ export function Workstation() {
                                     <Trash2 className="mx-auto h-3.5 w-3.5" />
                                   </button>
                                 </div>
-                                <div className="grid grid-cols-[1fr_auto] gap-2">
-                                  <select
-                                    className="h-9 min-w-0 rounded border border-white/10 bg-black px-3 text-xs text-white/75 outline-none focus:border-primary"
-                                    value={choice.targetSceneId || ''}
-                                    onChange={event => updateChoiceOption(index, {
-                                      targetSceneId: event.target.value || undefined,
-                                      targetActionId: undefined,
-                                      jumpMode: (event.target.value ? (choice.jumpMode === 'conditional' ? 'conditional' : 'direct') : 'linear') as VNChoiceJumpMode
-                                    })}
-                                  >
-                                    <option value="">{t('noTargetScene')}</option>
-                                    {project.nodes.map(node => (
-                                      <option key={node.id} value={node.id}>{node.title}</option>
-                                    ))}
-                                  </select>
-                                  <button
-                                    type="button"
-                                    onClick={() => createSceneForChoice(index)}
-                                    className="h-9 rounded border border-white/10 px-2 text-[10px] text-white/60 hover:border-primary hover:text-primary"
-                                  >
-                                    {t('new')}
-                                  </button>
-                                </div>
                                 {renderChoiceBindingControls(choice, index, {
                                   setTarget: sceneId => updateChoiceOption(index, {
                                     targetSceneId: sceneId || undefined,
@@ -7106,7 +7096,8 @@ export function Workstation() {
                                   setJumpCondition: (conditionIndex, updates) => updateChoiceJumpCondition(index, conditionIndex, updates),
                                   bindAffinity: (variableKey, amount) => bindChoiceAffinityEvent(index, variableKey, amount),
                                   clearAffinity: () => clearChoiceAffinityEvent(index),
-                                  setDisplayRange: (variableKey, min, max) => setChoiceDisplayRange(index, variableKey, min, max)
+                                  setDisplayRange: (variableKey, min, max) => setChoiceDisplayRange(index, variableKey, min, max),
+                                  createTarget: () => createSceneForChoice(index)
                                 }, `choice_${choice.id}`)}
                                 <div className="mt-3 border-t border-white/10 pt-3">
                                   <div className="mb-2 flex items-center justify-between">
